@@ -765,9 +765,48 @@ program
   .version('Version ' + package_default.version)
   .name(package_default.name)
   .action(async () => {
-    const server = await createServer();
-    setupExitWatchdog(server);
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    while (true) {
+      let server;
+      try {
+        server = await createServer();
+      } catch (error) {
+        console.error(
+          `Failed to create server: ${error.message}. Retrying server creation in 5 seconds...`
+        );
+        await wait(5000);
+        continue;
+      }
+
+      setupExitWatchdog(server);
+      const transport = new StdioServerTransport();
+
+      const MAX_CONNECTION_RETRIES = 3;
+      let connectionAttempts = 0;
+      let connected = false;
+
+      while (connectionAttempts < MAX_CONNECTION_RETRIES) {
+        try {
+          await server.connect(transport);
+          connected = true;
+          console.log('Server connected successfully.');
+          break;
+        } catch (error) {
+          connectionAttempts++;
+          console.error(
+            `Failed to connect server to transport (attempt ${connectionAttempts}/${MAX_CONNECTION_RETRIES}): ${error.message}. Retrying connection in 5 seconds...`
+          );
+          await wait(5000);
+        }
+      }
+
+      if (connected) {
+        break;
+      } else {
+        console.error(
+          'Max connection retries reached. Destroying current server and attempting full restart...'
+        );
+        await server.close();
+      }
+    }
   });
 program.parse(process.argv);
