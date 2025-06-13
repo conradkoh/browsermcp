@@ -30,91 +30,6 @@ import { WebSocket } from 'ws';
 // ../../packages-r2r/messaging/src/ws/types.ts
 var MESSAGE_RESPONSE_TYPE = 'messageResponse';
 
-// Enhanced logging utility
-function log(level, message, error = null) {
-  const timestamp = new Date().toISOString();
-  const logMessage = `[${timestamp}] ${level.toUpperCase()}: ${message}`;
-
-  if (level === 'error') {
-    console.error(logMessage, error || '');
-  } else if (level === 'warn') {
-    console.warn(logMessage);
-  } else {
-    console.log(logMessage);
-  }
-}
-
-// Enhanced WebSocket state management
-class WebSocketManager {
-  constructor() {
-    this.connectionState = 'disconnected';
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 5;
-    this.reconnectDelay = 1000;
-    this.heartbeatInterval = null;
-    this.isShuttingDown = false;
-  }
-
-  setConnectionState(state) {
-    if (this.connectionState !== state) {
-      log(
-        'info',
-        `WebSocket connection state changed: ${this.connectionState} -> ${state}`
-      );
-      this.connectionState = state;
-    }
-  }
-
-  startHeartbeat(ws) {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-    }
-
-    this.heartbeatInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.ping();
-        } catch (error) {
-          log('warn', 'Failed to send heartbeat ping', error);
-        }
-      }
-    }, 30000); // 30 second heartbeat
-  }
-
-  stopHeartbeat() {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-  }
-
-  async exponentialBackoff() {
-    const delay = Math.min(
-      this.reconnectDelay * Math.pow(2, this.reconnectAttempts),
-      30000
-    );
-    log(
-      'info',
-      `Waiting ${delay}ms before reconnection attempt ${
-        this.reconnectAttempts + 1
-      }`
-    );
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    this.reconnectAttempts++;
-  }
-
-  resetReconnectAttempts() {
-    this.reconnectAttempts = 0;
-  }
-
-  shutdown() {
-    this.isShuttingDown = true;
-    this.stopHeartbeat();
-  }
-}
-
-const wsManager = new WebSocketManager();
-
 // ../../packages-r2r/messaging/src/ws/sender.ts
 function createSocketMessageSender(ws) {
   async function sendSocketMessage(
@@ -125,27 +40,13 @@ function createSocketMessageSender(ws) {
     const { timeoutMs } = options;
     const id = generateId();
     const message = { id, type: type2, payload };
-
     return new Promise((resolve, reject) => {
-      // Validate WebSocket state before proceeding
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        reject(new Error('WebSocket is not open or available'));
-        return;
-      }
-
       const cleanup = () => {
-        try {
-          removeSocketMessageResponseListener();
-          ws.removeEventListener('error', errorHandler);
-          ws.removeEventListener('close', closeHandler);
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-          }
-        } catch (error) {
-          log('warn', 'Error during cleanup', error);
-        }
+        removeSocketMessageResponseListener();
+        ws.removeEventListener('error', errorHandler);
+        ws.removeEventListener('close', cleanup);
+        clearTimeout(timeoutId);
       };
-
       let timeoutId;
       if (timeoutMs) {
         timeoutId = setTimeout(() => {
@@ -153,118 +54,51 @@ function createSocketMessageSender(ws) {
           reject(new Error(`WebSocket response timeout after ${timeoutMs}ms`));
         }, timeoutMs);
       }
-
       const removeSocketMessageResponseListener =
         addSocketMessageResponseListener(ws, (responseMessage) => {
-          try {
-            const { payload: payload2 } = responseMessage;
-            if (payload2.requestId !== id) {
-              return;
-            }
-            const { result, error } = payload2;
-            if (error) {
-              reject(new Error(error));
-            } else {
-              resolve(result);
-            }
-            cleanup();
-          } catch (error) {
-            log('error', 'Error processing WebSocket response', error);
-            cleanup();
-            reject(new Error('Failed to process WebSocket response'));
+          const { payload: payload2 } = responseMessage;
+          if (payload2.requestId !== id) {
+            return;
           }
+          const { result, error } = payload2;
+          if (error) {
+            reject(new Error(error));
+          } else {
+            resolve(result);
+          }
+          cleanup();
         });
-
-      const errorHandler = (event) => {
-        log(
-          'error',
-          'WebSocket error during message send',
-          event?.error || 'Unknown error'
-        );
+      const errorHandler = (_event) => {
         cleanup();
         reject(new Error('WebSocket error occurred'));
       };
-
-      const closeHandler = () => {
-        log('warn', 'WebSocket closed during message send');
+      ws.addEventListener('error', errorHandler);
+      ws.addEventListener('close', cleanup);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(message));
+      } else {
         cleanup();
-        reject(new Error('WebSocket connection closed'));
-      };
-
-      try {
-        ws.addEventListener('error', errorHandler);
-        ws.addEventListener('close', closeHandler);
-
-        const messageStr = JSON.stringify(message);
-        ws.send(messageStr);
-      } catch (error) {
-        log('error', 'Failed to send WebSocket message', error);
-        cleanup();
-        reject(new Error(`Failed to send message: ${error.message}`));
+        reject(new Error('WebSocket is not open'));
       }
     });
   }
   return { sendSocketMessage };
 }
-
 function addSocketMessageResponseListener(ws, typeListener) {
   const listener = async (event) => {
-    try {
-      // Validate event data
-      if (!event.data) {
-        log('warn', 'Received WebSocket message with no data');
-        return;
-      }
-
-      let message;
-      try {
-        const dataStr = event.data.toString();
-        message = JSON.parse(dataStr);
-      } catch (parseError) {
-        log('error', 'Failed to parse WebSocket message JSON', parseError);
-        return;
-      }
-
-      // Validate message structure
-      if (!message || typeof message !== 'object') {
-        log('warn', 'Received invalid WebSocket message structure');
-        return;
-      }
-
-      if (message.type !== MESSAGE_RESPONSE_TYPE) {
-        return;
-      }
-
-      await typeListener(message);
-    } catch (error) {
-      log('error', 'Error in WebSocket message listener', error);
-      // Don't re-throw to prevent crashing the listener
+    const message = JSON.parse(event.data.toString());
+    if (message.type !== MESSAGE_RESPONSE_TYPE) {
+      return;
     }
+    await typeListener(message);
   };
-
   ws.addEventListener('message', listener);
-  return () => {
-    try {
-      ws.removeEventListener('message', listener);
-    } catch (error) {
-      log('warn', 'Error removing WebSocket message listener', error);
-    }
-  };
+  return () => ws.removeEventListener('message', listener);
 }
-
 function generateId() {
-  try {
-    if (typeof globalThis.crypto?.randomUUID === 'function') {
-      return globalThis.crypto.randomUUID();
-    }
-  } catch (error) {
-    log(
-      'warn',
-      'Failed to use crypto.randomUUID, falling back to timestamp method',
-      error
-    );
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
   }
-
   const timestamp = Date.now().toString(36);
   const randomStr = Math.random().toString(36).substring(2, 10);
   return `${timestamp}-${randomStr}`;
@@ -280,143 +114,36 @@ var mcpConfig = {
 
 // src/context.ts
 var noConnectionMessage = `No connection to browser extension. In order to proceed, you must first connect a tab by clicking the Browser MCP extension icon in the browser toolbar and clicking the 'Connect' button.`;
-
 var Context = class {
-  constructor() {
-    this._ws = null;
-    this.connectionRetryCount = 0;
-    this.maxRetries = 3;
-  }
-
+  _ws;
   get ws() {
     if (!this._ws) {
       throw new Error(noConnectionMessage);
     }
     return this._ws;
   }
-
   set ws(ws) {
-    // Clean up previous connection
-    if (this._ws && this._ws !== ws) {
-      try {
-        this._ws.close();
-      } catch (error) {
-        log('warn', 'Error closing previous WebSocket connection', error);
-      }
-    }
-
     this._ws = ws;
-    this.connectionRetryCount = 0;
-
-    if (ws) {
-      this.setupWebSocketHandlers(ws);
-      wsManager.setConnectionState('connected');
-      wsManager.resetReconnectAttempts();
-      wsManager.startHeartbeat(ws);
-    }
   }
-
-  setupWebSocketHandlers(ws) {
-    ws.on('error', (error) => {
-      log('error', 'WebSocket connection error', error);
-      wsManager.setConnectionState('error');
-    });
-
-    ws.on('close', (code, reason) => {
-      log('info', `WebSocket connection closed: ${code} ${reason}`);
-      wsManager.setConnectionState('disconnected');
-      wsManager.stopHeartbeat();
-
-      // Don't attempt reconnection if shutting down
-      if (!wsManager.isShuttingDown) {
-        this.handleConnectionLoss();
-      }
-    });
-
-    ws.on('pong', () => {
-      // Heartbeat response received
-      log('debug', 'Received heartbeat pong');
-    });
-  }
-
-  async handleConnectionLoss() {
-    if (this.connectionRetryCount >= this.maxRetries) {
-      log('error', 'Max connection retry attempts reached');
-      return;
-    }
-
-    this.connectionRetryCount++;
-    log(
-      'info',
-      `Attempting to handle connection loss (attempt ${this.connectionRetryCount}/${this.maxRetries})`
-    );
-
-    // Wait before next operation
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
-
   hasWs() {
-    return !!this._ws && this._ws.readyState === WebSocket.OPEN;
+    return !!this._ws;
   }
-
   async sendSocketMessage(type2, payload, options = { timeoutMs: 3e4 }) {
-    const maxRetries = 3;
-    let lastError;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        if (!this.hasWs()) {
-          throw new Error(noConnectionMessage);
-        }
-
-        const { sendSocketMessage } = createSocketMessageSender(this.ws);
-        const result = await sendSocketMessage(type2, payload, options);
-
-        // Reset retry count on success
-        this.connectionRetryCount = 0;
-        return result;
-      } catch (e) {
-        lastError = e;
-        log(
-          'warn',
-          `Socket message attempt ${attempt}/${maxRetries} failed`,
-          e
-        );
-
-        if (
-          e instanceof Error &&
-          e.message === mcpConfig.errors.noConnectedTab
-        ) {
-          throw new Error(noConnectionMessage);
-        }
-
-        if (attempt < maxRetries) {
-          // Wait before retry with exponential backoff
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        }
+    const { sendSocketMessage } = createSocketMessageSender(this.ws);
+    try {
+      return await sendSocketMessage(type2, payload, options);
+    } catch (e) {
+      if (e instanceof Error && e.message === mcpConfig.errors.noConnectedTab) {
+        throw new Error(noConnectionMessage);
       }
+      throw e;
     }
-
-    throw lastError;
   }
-
   async close() {
-    wsManager.shutdown();
-
     if (!this._ws) {
       return;
     }
-
-    try {
-      if (this._ws.readyState === WebSocket.OPEN) {
-        this._ws.close(1000, 'Server shutdown');
-      }
-    } catch (error) {
-      log('error', 'Error closing WebSocket connection', error);
-    } finally {
-      this._ws = null;
-    }
+    await this._ws.close();
   }
 };
 
@@ -426,7 +153,7 @@ import { WebSocketServer } from 'ws';
 // ../../packages/utils/src/index.ts
 async function wait(ms) {
   return new Promise((resolve) => {
-    setTimeout(() => resolve(undefined), ms);
+    setTimeout(() => resolve(), ms);
   });
 }
 
@@ -459,266 +186,77 @@ function killProcessOnPort(port) {
 
 // src/ws.ts
 async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
-  try {
-    killProcessOnPort(port);
-
-    // Wait for port to be available with timeout
-    const maxWaitTime = 10000; // 10 seconds
-    const startTime = Date.now();
-
-    while (await isPortInUse(port)) {
-      if (Date.now() - startTime > maxWaitTime) {
-        throw new Error(`Timeout waiting for port ${port} to become available`);
-      }
-      await wait(100);
-    }
-
-    const wss = new WebSocketServer({
-      port,
-      perMessageDeflate: false, // Disable compression to reduce CPU usage
-      maxPayload: 10 * 1024 * 1024, // 10MB max payload
-    });
-
-    // Add server-level error handling
-    wss.on('error', (error) => {
-      log('error', 'WebSocket server error', error);
-    });
-
-    wss.on('listening', () => {
-      log('info', `WebSocket server listening on port ${port}`);
-    });
-
-    return wss;
-  } catch (error) {
-    log('error', `Failed to create WebSocket server on port ${port}`, error);
-    throw error;
+  killProcessOnPort(port);
+  while (await isPortInUse(port)) {
+    await wait(100);
   }
+  return new WebSocketServer({ port });
 }
-
-// Circuit breaker for failing operations
-class CircuitBreaker {
-  constructor(threshold = 5, timeout = 60000) {
-    this.failureThreshold = threshold;
-    this.timeout = timeout;
-    this.failureCount = 0;
-    this.lastFailureTime = null;
-    this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
-  }
-
-  async execute(operation) {
-    if (this.state === 'OPEN') {
-      if (
-        this.lastFailureTime &&
-        Date.now() - this.lastFailureTime > this.timeout
-      ) {
-        this.state = 'HALF_OPEN';
-        log('info', 'Circuit breaker transitioning to HALF_OPEN');
-      } else {
-        throw new Error('Circuit breaker is OPEN');
-      }
-    }
-
-    try {
-      const result = await operation();
-      this.onSuccess();
-      return result;
-    } catch (error) {
-      this.onFailure();
-      throw error;
-    }
-  }
-
-  onSuccess() {
-    this.failureCount = 0;
-    this.state = 'CLOSED';
-  }
-
-  onFailure() {
-    this.failureCount++;
-    this.lastFailureTime = Date.now();
-
-    if (this.failureCount >= this.failureThreshold) {
-      this.state = 'OPEN';
-      log('warn', `Circuit breaker opened after ${this.failureCount} failures`);
-    }
-  }
-}
-
-const circuitBreaker = new CircuitBreaker();
 
 // src/server.ts
 async function createServerWithTools(options) {
   const { name, version, tools, resources: resources2 } = options;
   const context = new Context();
-
-  try {
-    const server = new Server(
-      { name, version },
-      {
-        capabilities: {
-          tools: {},
-          resources: {},
-        },
-      }
+  const server = new Server(
+    { name, version },
+    {
+      capabilities: {
+        tools: {},
+        resources: {},
+      },
+    }
+  );
+  const wss = await createWebSocketServer();
+  wss.on('connection', (websocket) => {
+    if (context.hasWs()) {
+      context.ws.close();
+    }
+    context.ws = websocket;
+  });
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return { tools: tools.map((tool) => tool.schema) };
+  });
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    return { resources: resources2.map((resource) => resource.schema) };
+  });
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const tool = tools.find(
+      (tool2) => tool2.schema.name === request.params.name
     );
-
-    const wss = await createWebSocketServer();
-
-    // Enhanced WebSocket connection handling
-    wss.on('connection', (websocket) => {
-      log('info', 'New WebSocket connection established');
-
-      try {
-        // Close existing connection if any
-        if (context.hasWs()) {
-          log('info', 'Closing existing WebSocket connection');
-          context.ws.close();
-        }
-
-        // Set up new connection
-        context.ws = websocket;
-
-        // Add connection-specific error handling
-        websocket.on('error', (error) => {
-          log('error', 'WebSocket connection error', error);
-        });
-
-        websocket.on('close', (code, reason) => {
-          log('info', `WebSocket connection closed: ${code} ${reason}`);
-        });
-      } catch (error) {
-        log('error', 'Error setting up WebSocket connection', error);
-        websocket.close(1011, 'Server error during connection setup');
-      }
-    });
-
-    // Enhanced request handlers with error handling and logging
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
-      try {
-        log('debug', 'Handling ListTools request');
-        return { tools: tools.map((tool) => tool.schema) };
-      } catch (error) {
-        log('error', 'Error handling ListTools request', error);
-        throw error;
-      }
-    });
-
-    server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      try {
-        log('debug', 'Handling ListResources request');
-        return { resources: resources2.map((resource) => resource.schema) };
-      } catch (error) {
-        log('error', 'Error handling ListResources request', error);
-        throw error;
-      }
-    });
-
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const toolName = request.params?.name || 'unknown';
-      log('info', `Handling CallTool request for: ${toolName}`);
-
-      try {
-        const tool = tools.find(
-          (tool2) => tool2.schema.name === request.params.name
-        );
-
-        if (!tool) {
-          log('warn', `Tool not found: ${toolName}`);
-          return {
-            content: [
-              { type: 'text', text: `Tool "${request.params.name}" not found` },
-            ],
-            isError: true,
-          };
-        }
-
-        // Use circuit breaker for tool execution
-        const result = await circuitBreaker.execute(async () => {
-          return await tool.handle(context, request.params.arguments);
-        });
-
-        log('info', `Tool ${toolName} executed successfully`);
-        return result;
-      } catch (error) {
-        log('error', `Error executing tool ${toolName}`, error);
-
-        // Return structured error response
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error executing ${toolName}: ${
-                error.message || String(error)
-              }`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    });
-
-    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-      const resourceUri = request.params?.uri || 'unknown';
-      log('info', `Handling ReadResource request for: ${resourceUri}`);
-
-      try {
-        const resource = resources2.find(
-          (resource2) => resource2.schema.uri === request.params.uri
-        );
-
-        if (!resource) {
-          log('warn', `Resource not found: ${resourceUri}`);
-          return { contents: [] };
-        }
-
-        const contents = await resource.read(context, request.params.uri);
-        log('info', `Resource ${resourceUri} read successfully`);
-        return { contents };
-      } catch (error) {
-        log('error', `Error reading resource ${resourceUri}`, error);
-        return { contents: [] };
-      }
-    });
-
-    // Enhanced server close method
-    const originalClose = server.close.bind(server);
-    server.close = async () => {
-      log('info', 'Shutting down server...');
-
-      try {
-        // Close WebSocket server first
-        if (wss) {
-          await new Promise((resolve, reject) => {
-            wss.close((error) => {
-              if (error) {
-                log('error', 'Error closing WebSocket server', error);
-                reject(error);
-              } else {
-                log('info', 'WebSocket server closed');
-                resolve(undefined);
-              }
-            });
-          });
-        }
-
-        // Close context
-        await context.close();
-
-        // Close MCP server
-        await originalClose();
-
-        log('info', 'Server shutdown complete');
-      } catch (error) {
-        log('error', 'Error during server shutdown', error);
-        throw error;
-      }
-    };
-
-    return server;
-  } catch (error) {
-    log('error', 'Failed to create server', error);
-    throw error;
-  }
+    if (!tool) {
+      return {
+        content: [
+          { type: 'text', text: `Tool "${request.params.name}" not found` },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const result = await tool.handle(context, request.params.arguments);
+      return result;
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: String(error) }],
+        isError: true,
+      };
+    }
+  });
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const resource = resources2.find(
+      (resource2) => resource2.schema.uri === request.params.uri
+    );
+    if (!resource) {
+      return { contents: [] };
+    }
+    const contents = await resource.read(context, request.params.uri);
+    return { contents };
+  });
+  server.close = async () => {
+    await server.close();
+    await wss.close();
+    await context.close();
+  };
+  return server;
 }
 
 // src/tools/common.ts
@@ -1192,62 +730,12 @@ var package_default = {
   },
 };
 
-// Global error handlers
-process.on('uncaughtException', (error) => {
-  log('error', `Uncaught exception: ${error.message || String(error)}`);
-  console.error('Stack trace:', error.stack);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  log('error', `Unhandled promise rejection: ${String(reason)}`);
-  console.error('Promise:', promise);
-  process.exit(1);
-});
-
-// Enhanced exit watchdog with graceful shutdown
+// src/index.ts
 function setupExitWatchdog(server) {
-  let isShuttingDown = false;
-
-  const gracefulShutdown = async (signal) => {
-    if (isShuttingDown) {
-      log('warn', `Received ${signal} during shutdown, forcing exit`);
-      process.exit(1);
-      return;
-    }
-
-    isShuttingDown = true;
-    log('info', `Received ${signal}, starting graceful shutdown...`);
-
-    // Set a timeout for forced shutdown
-    const forceShutdownTimeout = setTimeout(() => {
-      log('error', 'Graceful shutdown timeout, forcing exit');
-      process.exit(1);
-    }, 15000); // 15 seconds timeout
-
-    try {
-      await server.close();
-      clearTimeout(forceShutdownTimeout);
-      log('info', 'Graceful shutdown completed');
-      process.exit(0);
-    } catch (error) {
-      log('error', 'Error during graceful shutdown', error);
-      clearTimeout(forceShutdownTimeout);
-      process.exit(1);
-    }
-  };
-
-  // Handle various exit signals
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
-
-  // Handle stdin close (for MCP protocol)
-  process.stdin.on('close', () => gracefulShutdown('STDIN_CLOSE'));
-
-  // Handle process exit
-  process.on('exit', (code) => {
-    log('info', `Process exiting with code ${code}`);
+  process.stdin.on('close', async () => {
+    setTimeout(() => process.exit(0), 15e3);
+    await server.close();
+    process.exit(0);
   });
 }
 var commonTools = [pressKey, wait2];
@@ -1277,30 +765,9 @@ program
   .version('Version ' + package_default.version)
   .name(package_default.name)
   .action(async () => {
-    try {
-      log('info', `Starting ${appConfig.name} v${package_default.version}`);
-
-      const server = await createServer();
-      setupExitWatchdog(server);
-
-      const transport = new StdioServerTransport();
-      await server.connect(transport);
-
-      log('info', 'Server started successfully and connected to transport');
-    } catch (error) {
-      log('error', `Failed to start server: ${error.message || String(error)}`);
-      console.error('Stack trace:', error.stack);
-      process.exit(1);
-    }
+    const server = await createServer();
+    setupExitWatchdog(server);
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
   });
-
-// Parse command line arguments with error handling
-try {
-  program.parse(process.argv);
-} catch (error) {
-  log(
-    'error',
-    `Failed to parse command line arguments: ${error.message || String(error)}`
-  );
-  process.exit(1);
-}
+program.parse(process.argv);
