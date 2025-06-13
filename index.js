@@ -189,13 +189,60 @@ function killProcessOnPort(port) {
         stdio: 'pipe',
       }).trim();
       if (pids) {
-        execSync(`kill -9 ${pids}`, { stdio: 'pipe' });
-        console.log(
-          `Killed existing process(es) on port ${port}: ${pids.replace(
-            /\n/g,
-            ', '
-          )}`
-        );
+        const pidList = pids.split('\n').filter((pid) => pid.trim());
+        const currentPid = process.pid.toString();
+
+        // Filter out our own process to avoid killing ourselves
+        const otherPids = pidList.filter((pid) => pid !== currentPid);
+
+        if (otherPids.length > 0) {
+          // First try graceful termination
+          try {
+            execSync(`kill -TERM ${otherPids.join(' ')}`, { stdio: 'pipe' });
+            console.log(
+              `Sent TERM signal to process(es) on port ${port}: ${otherPids.join(
+                ', '
+              )}`
+            );
+
+            // Wait a bit for graceful shutdown
+            execSync('sleep 1', { stdio: 'pipe' });
+
+            // Check if any are still running and force kill if needed
+            const stillRunning = execSync(`lsof -ti:${port}`, {
+              encoding: 'utf8',
+              stdio: 'pipe',
+            }).trim();
+
+            if (stillRunning) {
+              const stillRunningPids = stillRunning
+                .split('\n')
+                .filter((pid) => pid.trim() && pid !== currentPid);
+              if (stillRunningPids.length > 0) {
+                execSync(`kill -9 ${stillRunningPids.join(' ')}`, {
+                  stdio: 'pipe',
+                });
+                console.log(
+                  `Force killed remaining process(es) on port ${port}: ${stillRunningPids.join(
+                    ', '
+                  )}`
+                );
+              }
+            }
+          } catch (killError) {
+            // If graceful kill fails, try force kill
+            execSync(`kill -9 ${otherPids.join(' ')}`, { stdio: 'pipe' });
+            console.log(
+              `Force killed process(es) on port ${port}: ${otherPids.join(
+                ', '
+              )}`
+            );
+          }
+        } else {
+          console.log(
+            `Process on port ${port} is current process (PID: ${currentPid}), skipping kill`
+          );
+        }
       } else {
         console.log(`No existing processes found on port ${port}`);
       }
@@ -214,6 +261,9 @@ function killProcessOnPort(port) {
 async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
   console.log(`Initializing WebSocket server on port ${port}...`);
   killProcessOnPort(port);
+
+  // Give a moment for processes to fully terminate
+  await wait(500);
 
   let attempts = 0;
   const maxAttempts = 50; // 5 seconds total wait time
@@ -234,7 +284,9 @@ async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
   }
 
   console.log(`Port ${port} is now available. Starting WebSocket server...`);
-  return new WebSocketServer({ port });
+  const wss = new WebSocketServer({ port });
+  console.log(`WebSocket server successfully started on port ${port}`);
+  return wss;
 }
 
 // src/server.ts
@@ -295,8 +347,9 @@ async function createServerWithTools(options) {
     const contents = await resource.read(context, request.params.uri);
     return { contents };
   });
+  const originalClose = server.close.bind(server);
   server.close = async () => {
-    await server.close();
+    await originalClose();
     await wss.close();
     await context.close();
   };
@@ -774,14 +827,320 @@ var package_default = {
   },
 };
 
-// src/index.ts
-function setupExitWatchdog(server) {
-  process.stdin.on('close', async () => {
-    setTimeout(() => process.exit(0), 15e3);
-    await server.close();
-    process.exit(0);
-  });
+// Finite State Machine for Server Management
+/**
+ * ServerStateMachine manages the lifecycle of the MCP server with explicit state transitions.
+ *
+ * States:
+ * - INITIALIZING: Initial state, transitions to CREATING_SERVER
+ * - CREATING_SERVER: Attempting to create server instance
+ * - RETRYING_SERVER_CREATION: Waiting before retrying server creation
+ * - CONNECTING: Attempting to connect server to transport
+ * - RETRYING_CONNECTION: Waiting before retrying connection
+ * - CONNECTED: Successfully connected and running
+ * - RECONNECTING: Connection lost, attempting to reconnect
+ * - RESTARTING: Max connection retries exceeded, full restart
+ * - SHUTTING_DOWN: Graceful shutdown in progress
+ * - SHUTDOWN: Shutdown complete
+ * - FAILED: Permanent failure, will exit
+ *
+ * State Transitions:
+ * INITIALIZING -> CREATING_SERVER
+ * CREATING_SERVER -> CONNECTING (success) | RETRYING_SERVER_CREATION (failure)
+ * RETRYING_SERVER_CREATION -> CREATING_SERVER (after delay)
+ * CONNECTING -> CONNECTED (success) | RETRYING_CONNECTION (failure)
+ * RETRYING_CONNECTION -> CONNECTING (after delay) | RESTARTING (max retries)
+ * CONNECTED -> RECONNECTING (connection lost) | SHUTTING_DOWN (exit signal)
+ * RECONNECTING -> CREATING_SERVER
+ * RESTARTING -> CREATING_SERVER
+ * SHUTTING_DOWN -> SHUTDOWN
+ * Any state -> FAILED (permanent error)
+ *
+ * Benefits of this FSM approach:
+ * 1. Clear separation of concerns - each state has a single responsibility
+ * 2. Predictable error handling - errors are handled based on current state
+ * 3. Proper resource cleanup - resources are cleaned up at appropriate state transitions
+ * 4. Debuggability - state history and current state are tracked
+ * 5. Maintainability - adding new states or transitions is straightforward
+ * 6. Reliability - prevents race conditions and ensures proper shutdown
+ */
+class ServerStateMachine {
+  constructor() {
+    this.state = 'INITIALIZING';
+    this.server = null;
+    this.transport = null;
+    this.retryCount = 0;
+    this.maxRetries = 3;
+    this.retryDelay = 5000;
+    this.isShuttingDown = false;
+    this.stateHistory = [];
+
+    // Bind methods to preserve 'this' context
+    this.transition = this.transition.bind(this);
+    this.handleError = this.handleError.bind(this);
+    this.cleanup = this.cleanup.bind(this);
+  }
+
+  // State transition with logging and history
+  transition(newState, context = {}) {
+    const previousState = this.state;
+    this.stateHistory.push({
+      from: previousState,
+      to: newState,
+      timestamp: new Date().toISOString(),
+      context,
+    });
+
+    this.state = newState;
+    console.log(`State transition: ${previousState} -> ${newState}`, context);
+
+    // Reset retry count on successful transitions
+    if (newState === 'CONNECTED') {
+      this.retryCount = 0;
+    }
+  }
+
+  // Centralized error handling with state-aware logic
+  async handleError(error, currentOperation) {
+    console.error(`Error in ${currentOperation}:`, error.message);
+
+    if (this.isShuttingDown) {
+      this.transition('SHUTDOWN', { reason: 'Error during shutdown' });
+      return;
+    }
+
+    switch (this.state) {
+      case 'CREATING_SERVER':
+        if (this.retryCount < this.maxRetries) {
+          this.retryCount++;
+          this.transition('RETRYING_SERVER_CREATION', {
+            attempt: this.retryCount,
+            error: error.message,
+          });
+        } else {
+          this.transition('FAILED', {
+            reason: 'Max server creation retries exceeded',
+            error: error.message,
+          });
+        }
+        break;
+
+      case 'CONNECTING':
+        if (this.retryCount < this.maxRetries) {
+          this.retryCount++;
+          this.transition('RETRYING_CONNECTION', {
+            attempt: this.retryCount,
+            error: error.message,
+          });
+        } else {
+          this.transition('RESTARTING', {
+            reason: 'Max connection retries exceeded',
+            error: error.message,
+          });
+        }
+        break;
+
+      case 'CONNECTED':
+        this.transition('RECONNECTING', {
+          reason: 'Connection lost',
+          error: error.message,
+        });
+        break;
+
+      default:
+        this.transition('FAILED', {
+          reason: `Unexpected error in state ${this.state}`,
+          error: error.message,
+        });
+    }
+  }
+
+  // Cleanup resources based on current state
+  async cleanup() {
+    console.log(`Cleaning up resources in state: ${this.state}`);
+
+    try {
+      if (this.server) {
+        await this.server.close();
+        this.server = null;
+      }
+    } catch (error) {
+      console.error('Error closing server:', error.message);
+    }
+
+    this.transport = null;
+  }
+
+  // Setup exit handlers with state machine integration
+  setupExitWatchdog() {
+    const gracefulShutdown = async (signal) => {
+      if (this.isShuttingDown) {
+        console.log(`Already shutting down, ignoring ${signal}`);
+        return;
+      }
+
+      this.isShuttingDown = true;
+      this.transition('SHUTTING_DOWN', { signal });
+
+      try {
+        await this.cleanup();
+        this.transition('SHUTDOWN', { signal });
+        console.log('Server closed successfully');
+        process.exit(0);
+      } catch (error) {
+        console.error('Error during shutdown:', error);
+        process.exit(1);
+      }
+    };
+
+    // Handle various exit signals
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
+
+    process.stdin.on('close', async () => {
+      if (!this.isShuttingDown) {
+        console.log('stdin closed, shutting down...');
+        setTimeout(() => {
+          console.log('Forced exit after timeout');
+          process.exit(0);
+        }, 15000);
+        await gracefulShutdown('stdin close');
+      }
+    });
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+      console.error('Uncaught exception:', error);
+      if (!this.isShuttingDown) {
+        gracefulShutdown('uncaughtException');
+      }
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+      console.error('Unhandled rejection at:', promise, 'reason:', reason);
+      if (!this.isShuttingDown) {
+        gracefulShutdown('unhandledRejection');
+      }
+    });
+  }
+
+  // Main state machine execution loop
+  async run() {
+    this.setupExitWatchdog();
+
+    while (!this.isShuttingDown) {
+      try {
+        switch (this.state) {
+          case 'INITIALIZING':
+            this.transition('CREATING_SERVER');
+            break;
+
+          case 'CREATING_SERVER':
+            try {
+              this.server = await createServer();
+              this.transition('CONNECTING');
+            } catch (error) {
+              await this.handleError(error, 'server creation');
+            }
+            break;
+
+          case 'RETRYING_SERVER_CREATION':
+            console.log(
+              `Retrying server creation in ${this.retryDelay}ms (attempt ${this.retryCount}/${this.maxRetries})`
+            );
+            await wait(this.retryDelay);
+            this.transition('CREATING_SERVER');
+            break;
+
+          case 'CONNECTING':
+            try {
+              if (!this.server) {
+                throw new Error('Server not initialized');
+              }
+              this.transport = new StdioServerTransport();
+              await this.server.connect(this.transport);
+              this.transition('CONNECTED');
+            } catch (error) {
+              await this.handleError(error, 'connection');
+            }
+            break;
+
+          case 'RETRYING_CONNECTION':
+            console.log(
+              `Retrying connection in ${this.retryDelay}ms (attempt ${this.retryCount}/${this.maxRetries})`
+            );
+            await wait(this.retryDelay);
+            this.transition('CONNECTING');
+            break;
+
+          case 'CONNECTED':
+            console.log('Server connected successfully. Running...');
+            // In connected state, we wait for external events (handled by exit watchdog)
+            // This prevents the loop from spinning
+            await new Promise((resolve) => {
+              // This will be resolved by shutdown or error handlers
+              const checkShutdown = () => {
+                if (this.isShuttingDown || this.state !== 'CONNECTED') {
+                  resolve(undefined);
+                } else {
+                  setTimeout(checkShutdown, 1000);
+                }
+              };
+              checkShutdown();
+            });
+            break;
+
+          case 'RECONNECTING':
+            console.log('Attempting to reconnect...');
+            await this.cleanup();
+            this.retryCount = 0;
+            this.transition('CREATING_SERVER');
+            break;
+
+          case 'RESTARTING':
+            console.log('Max connection retries reached. Restarting server...');
+            await this.cleanup();
+            this.retryCount = 0;
+            this.transition('CREATING_SERVER');
+            break;
+
+          case 'FAILED':
+            console.error('Server failed permanently. Exiting...');
+            await this.cleanup();
+            process.exit(1);
+            break;
+
+          case 'SHUTTING_DOWN':
+          case 'SHUTDOWN':
+            // These states are handled by the exit watchdog
+            return;
+
+          default:
+            console.error(`Unknown state: ${this.state}`);
+            this.transition('FAILED', { reason: 'Unknown state' });
+        }
+      } catch (error) {
+        console.error('Unexpected error in state machine:', error);
+        await this.handleError(error, `state ${this.state}`);
+      }
+    }
+  }
+
+  // Debug method to get current state info
+  getStateInfo() {
+    return {
+      currentState: this.state,
+      retryCount: this.retryCount,
+      maxRetries: this.maxRetries,
+      isShuttingDown: this.isShuttingDown,
+      hasServer: !!this.server,
+      hasTransport: !!this.transport,
+      stateHistory: this.stateHistory.slice(-10), // Last 10 transitions
+    };
+  }
 }
+
 var commonTools = [pressKey, wait2];
 var customTools = [getConsoleLogs, screenshot];
 var snapshotTools = [
@@ -809,48 +1168,7 @@ program
   .version('Version ' + package_default.version)
   .name(package_default.name)
   .action(async () => {
-    while (true) {
-      let server;
-      try {
-        server = await createServer();
-      } catch (error) {
-        console.error(
-          `Failed to create server: ${error.message}. Retrying server creation in 5 seconds...`
-        );
-        await wait(5000);
-        continue;
-      }
-
-      setupExitWatchdog(server);
-      const transport = new StdioServerTransport();
-
-      const MAX_CONNECTION_RETRIES = 3;
-      let connectionAttempts = 0;
-      let connected = false;
-
-      while (connectionAttempts < MAX_CONNECTION_RETRIES) {
-        try {
-          await server.connect(transport);
-          connected = true;
-          console.log('Server connected successfully.');
-          break;
-        } catch (error) {
-          connectionAttempts++;
-          console.error(
-            `Failed to connect server to transport (attempt ${connectionAttempts}/${MAX_CONNECTION_RETRIES}): ${error.message}. Retrying connection in 5 seconds...`
-          );
-          await wait(5000);
-        }
-      }
-
-      if (connected) {
-        break;
-      } else {
-        console.error(
-          'Max connection retries reached. Destroying current server and attempting full restart...'
-        );
-        await server.close();
-      }
-    }
+    const stateMachine = new ServerStateMachine();
+    await stateMachine.run();
   });
 program.parse(process.argv);
