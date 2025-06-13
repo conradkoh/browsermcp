@@ -153,7 +153,7 @@ import { WebSocketServer } from 'ws';
 // ../../packages/utils/src/index.ts
 async function wait(ms) {
   return new Promise((resolve) => {
-    setTimeout(() => resolve(), ms);
+    setTimeout(() => resolve(undefined), ms);
   });
 }
 
@@ -172,24 +172,68 @@ async function isPortInUse(port) {
 }
 function killProcessOnPort(port) {
   try {
+    console.log(`Checking for existing processes on port ${port}...`);
     if (process.platform === 'win32') {
-      execSync(
-        `FOR /F "tokens=5" %a in ('netstat -ano ^| findstr :${port}') do taskkill /F /PID %a`
+      // Windows: Find and kill processes using the port
+      const result = execSync(
+        `FOR /F "tokens=5" %a in ('netstat -ano ^| findstr :${port}') do taskkill /F /PID %a`,
+        { encoding: 'utf8', stdio: 'pipe' }
       );
+      if (result.trim()) {
+        console.log(`Killed existing process on port ${port}`);
+      }
     } else {
-      execSync(`lsof -ti:${port} | xargs kill -9`);
+      // Unix/Linux/macOS: Find PIDs using the port and kill them
+      const pids = execSync(`lsof -ti:${port}`, {
+        encoding: 'utf8',
+        stdio: 'pipe',
+      }).trim();
+      if (pids) {
+        execSync(`kill -9 ${pids}`, { stdio: 'pipe' });
+        console.log(
+          `Killed existing process(es) on port ${port}: ${pids.replace(
+            /\n/g,
+            ', '
+          )}`
+        );
+      } else {
+        console.log(`No existing processes found on port ${port}`);
+      }
     }
   } catch (error) {
-    console.error(`Failed to kill process on port ${port}:`, error);
+    // This is expected if no process is using the port
+    if (error.status === 1) {
+      console.log(`No existing processes found on port ${port}`);
+    } else {
+      console.error(`Failed to kill process on port ${port}:`, error.message);
+    }
   }
 }
 
 // src/ws.ts
 async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
+  console.log(`Initializing WebSocket server on port ${port}...`);
   killProcessOnPort(port);
+
+  let attempts = 0;
+  const maxAttempts = 50; // 5 seconds total wait time
+
   while (await isPortInUse(port)) {
+    attempts++;
+    if (attempts > maxAttempts) {
+      throw new Error(
+        `Port ${port} is still in use after ${
+          maxAttempts * 100
+        }ms. Unable to start server.`
+      );
+    }
+    console.log(
+      `Port ${port} still in use, waiting... (attempt ${attempts}/${maxAttempts})`
+    );
     await wait(100);
   }
+
+  console.log(`Port ${port} is now available. Starting WebSocket server...`);
   return new WebSocketServer({ port });
 }
 
