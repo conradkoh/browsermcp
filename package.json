@@ -1,15 +1,15 @@
 {
-  "name": "@conradkoh/browsermcp2",
+  "name": "@conradkoh/browsermcp",
   "version": "1.0.16",
   "description": "",
   "main": "index.js",
   "scripts": {},
   "bin": {
-    "mcp-server-browsermcp2": "index.js"
+    "mcp-server-browsermcp": "index.js"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/conradkoh/browsermcp2.git"
+    "url": "git+https://github.com/conradkoh/browsermcp.git"
   },
   "keywords": [],
   "author": "",

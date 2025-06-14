@@ -1,6 +1,21 @@
-# Browser MCP 2
+# Browser MCP
 
 This is a fork of [@browsermcp/mcp](https://www.npmjs.com/package/@browsermcp/mcp) that fixes some reliability issues.
+
+## Installation
+
+Add this to the mcp.json file
+
+```json
+{
+  "mcpServers": {
+    "browsermcp": {
+      "command": "npx",
+      "args": ["@conradkoh/browsermcp2@latest"]
+    }
+  }
+}
+```
 
 ## Finding Logs
 
