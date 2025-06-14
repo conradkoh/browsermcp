@@ -7,6 +7,10 @@
   "bin": {
     "mcp-server-browsermcp2": "index.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/conradkoh/browsermcp2.git"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
