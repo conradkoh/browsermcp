@@ -1,0 +1,7 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Logging
+- DO NOT use console.log because this is reserved for communication in MCP

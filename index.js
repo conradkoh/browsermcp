@@ -157,6 +157,103 @@ async function wait(ms) {
   });
 }
 
+// Logging utilities
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+class Logger {
+  constructor() {
+    // Create temp file for logging
+    const tempDir = os.tmpdir();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    this.logFile = path.join(
+      tempDir,
+      `browsermcp-${timestamp}-${process.pid}.log`
+    );
+
+    // Initialize log file
+    try {
+      fs.writeFileSync(
+        this.logFile,
+        `Browser MCP Server Log - Started at ${new Date().toISOString()}\n`
+      );
+      fs.writeFileSync(this.logFile, `Process ID: ${process.pid}\n`, {
+        flag: 'a',
+      });
+      fs.writeFileSync(this.logFile, `Log file: ${this.logFile}\n\n`, {
+        flag: 'a',
+      });
+    } catch (error) {
+      console.error('Failed to initialize log file:', error.message);
+    }
+  }
+
+  // Log to temp file only
+  log(message, context = {}) {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] ${message}${
+      context && Object.keys(context).length > 0
+        ? ' ' + JSON.stringify(context, null, 2)
+        : ''
+    }\n`;
+
+    try {
+      fs.writeFileSync(this.logFile, logEntry, { flag: 'a' });
+    } catch (error) {
+      // If we can't write to log file, fall back to stderr
+      console.error('Failed to write to log file:', error.message);
+      console.error('Original message:', message);
+    }
+  }
+
+  // Log to both temp file and stderr (for real errors)
+  error(message, context = {}) {
+    // Log to temp file
+    this.log(`ERROR: ${message}`, context);
+
+    // Also log to stderr
+    console.error(message);
+    if (context && Object.keys(context).length > 0) {
+      console.error('Error context:', context);
+    }
+  }
+
+  // Get the log file path
+  getLogFilePath() {
+    return this.logFile;
+  }
+
+  // Log crash info and output log file path to stderr
+  crash(message, error) {
+    const crashInfo = {
+      message,
+      error: error
+        ? {
+            message: error.message,
+            stack: error.stack,
+            name: error.name,
+          }
+        : undefined,
+      timestamp: new Date().toISOString(),
+      processId: process.pid,
+    };
+
+    // Log crash details to temp file
+    this.log(`CRASH: ${message}`, crashInfo);
+
+    // Output to stderr
+    console.error(`FATAL ERROR: ${message}`);
+    if (error) {
+      console.error('Error details:', error.message);
+    }
+    console.error(`Full logs available at: ${this.logFile}`);
+  }
+}
+
+// Global logger instance
+const logger = new Logger();
+
 // src/utils/port.ts
 import { execSync } from 'node:child_process';
 import net from 'node:net';
@@ -172,7 +269,7 @@ async function isPortInUse(port) {
 }
 function killProcessOnPort(port) {
   try {
-    console.log(`Checking for existing processes on port ${port}...`);
+    logger.log(`Checking for existing processes on port ${port}...`);
     if (process.platform === 'win32') {
       // Windows: Find and kill processes using the port
       const result = execSync(
@@ -180,7 +277,7 @@ function killProcessOnPort(port) {
         { encoding: 'utf8', stdio: 'pipe' }
       );
       if (result.trim()) {
-        console.log(`Killed existing process on port ${port}`);
+        logger.log(`Killed existing process on port ${port}`);
       }
     } else {
       // Unix/Linux/macOS: Find PIDs using the port and kill them
@@ -199,7 +296,7 @@ function killProcessOnPort(port) {
           // First try graceful termination
           try {
             execSync(`kill -TERM ${otherPids.join(' ')}`, { stdio: 'pipe' });
-            console.log(
+            logger.log(
               `Sent TERM signal to process(es) on port ${port}: ${otherPids.join(
                 ', '
               )}`
@@ -222,7 +319,7 @@ function killProcessOnPort(port) {
                 execSync(`kill -9 ${stillRunningPids.join(' ')}`, {
                   stdio: 'pipe',
                 });
-                console.log(
+                logger.log(
                   `Force killed remaining process(es) on port ${port}: ${stillRunningPids.join(
                     ', '
                   )}`
@@ -232,34 +329,36 @@ function killProcessOnPort(port) {
           } catch (killError) {
             // If graceful kill fails, try force kill
             execSync(`kill -9 ${otherPids.join(' ')}`, { stdio: 'pipe' });
-            console.log(
+            logger.log(
               `Force killed process(es) on port ${port}: ${otherPids.join(
                 ', '
               )}`
             );
           }
         } else {
-          console.log(
+          logger.log(
             `Process on port ${port} is current process (PID: ${currentPid}), skipping kill`
           );
         }
       } else {
-        console.log(`No existing processes found on port ${port}`);
+        logger.log(`No existing processes found on port ${port}`);
       }
     }
   } catch (error) {
     // This is expected if no process is using the port
     if (error.status === 1) {
-      console.log(`No existing processes found on port ${port}`);
+      logger.log(`No existing processes found on port ${port}`);
     } else {
-      console.error(`Failed to kill process on port ${port}:`, error.message);
+      logger.error(`Failed to kill process on port ${port}:`, {
+        error: error.message,
+      });
     }
   }
 }
 
 // src/ws.ts
 async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
-  console.log(`Initializing WebSocket server on port ${port}...`);
+  logger.log(`Initializing WebSocket server on port ${port}...`);
   killProcessOnPort(port);
 
   // Give a moment for processes to fully terminate
@@ -277,15 +376,15 @@ async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
         }ms. Unable to start server.`
       );
     }
-    console.log(
+    logger.log(
       `Port ${port} still in use, waiting... (attempt ${attempts}/${maxAttempts})`
     );
     await wait(100);
   }
 
-  console.log(`Port ${port} is now available. Starting WebSocket server...`);
+  logger.log(`Port ${port} is now available. Starting WebSocket server...`);
   const wss = new WebSocketServer({ port });
-  console.log(`WebSocket server successfully started on port ${port}`);
+  logger.log(`WebSocket server successfully started on port ${port}`);
   return wss;
 }
 
@@ -904,7 +1003,7 @@ class ServerStateMachine {
 
     // Validate transition
     if (!this.validTransitions[previousState]?.includes(newState)) {
-      console.warn(`Invalid state transition: ${previousState} -> ${newState}`);
+      logger.error(`Invalid state transition: ${previousState} -> ${newState}`);
       // Allow it but log the warning
     }
 
@@ -922,7 +1021,7 @@ class ServerStateMachine {
     });
 
     this.state = newState;
-    console.log(`State transition: ${previousState} -> ${newState}`, context);
+    logger.log(`State transition: ${previousState} -> ${newState}`, context);
 
     // Reset retry count on successful transitions
     if (newState === 'CONNECTED') {
@@ -940,8 +1039,7 @@ class ServerStateMachine {
       currentRetryCount: this.retryCount,
     };
 
-    console.error(`Error in ${currentOperation}:`, error.message);
-    console.debug('Error details:', errorContext);
+    logger.error(`Error in ${currentOperation}:`, errorContext);
 
     if (this.isShuttingDown) {
       this.transition('SHUTDOWN', {
@@ -1003,7 +1101,7 @@ class ServerStateMachine {
 
   // Cleanup resources based on current state
   async cleanup() {
-    console.log(`Cleaning up resources in state: ${this.state}`);
+    logger.log(`Cleaning up resources in state: ${this.state}`);
 
     try {
       if (this.server) {
@@ -1011,7 +1109,7 @@ class ServerStateMachine {
         this.server = null;
       }
     } catch (error) {
-      console.error('Error closing server:', error.message);
+      logger.error('Error closing server:', { error: error.message });
     }
 
     this.transport = null;
@@ -1021,7 +1119,7 @@ class ServerStateMachine {
   setupExitWatchdog() {
     const gracefulShutdown = async (signal) => {
       if (this.isShuttingDown) {
-        console.log(`Already shutting down, ignoring ${signal}`);
+        logger.log(`Already shutting down, ignoring ${signal}`);
         return;
       }
 
@@ -1031,10 +1129,19 @@ class ServerStateMachine {
       try {
         await this.cleanup();
         this.transition('SHUTDOWN', { signal });
-        console.log('Server closed successfully');
+        logger.log('Server closed successfully');
+        console.error(
+          `Exiting. Full logs available at: ${logger.getLogFilePath()}`
+        );
         process.exit(0);
       } catch (error) {
-        console.error('Error during shutdown:', error);
+        logger.error('Error during shutdown:', {
+          error: error.message,
+          stack: error.stack,
+        });
+        console.error(
+          `Exiting with error. Full logs available at: ${logger.getLogFilePath()}`
+        );
         process.exit(1);
       }
     };
@@ -1046,9 +1153,12 @@ class ServerStateMachine {
 
     process.stdin.on('close', async () => {
       if (!this.isShuttingDown) {
-        console.log('stdin closed, shutting down...');
+        logger.log('stdin closed, shutting down...');
         setTimeout(() => {
-          console.log('Forced exit after timeout');
+          logger.log('Forced exit after timeout');
+          console.error(
+            `Forced exit after timeout. Full logs available at: ${logger.getLogFilePath()}`
+          );
           process.exit(0);
         }, 15000);
         await gracefulShutdown('stdin close');
@@ -1057,14 +1167,17 @@ class ServerStateMachine {
 
     // Handle uncaught exceptions
     process.on('uncaughtException', (error) => {
-      console.error('Uncaught exception:', error);
+      logger.crash('Uncaught exception', error);
       if (!this.isShuttingDown) {
         gracefulShutdown('uncaughtException');
       }
     });
 
     process.on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled rejection at:', promise, 'reason:', reason);
+      logger.crash(
+        'Unhandled rejection',
+        new Error(`Unhandled rejection at: ${promise}, reason: ${reason}`)
+      );
       if (!this.isShuttingDown) {
         gracefulShutdown('unhandledRejection');
       }
@@ -1092,7 +1205,7 @@ class ServerStateMachine {
             break;
 
           case 'RETRYING_SERVER_CREATION':
-            console.log(
+            logger.log(
               `Retrying server creation in ${this.retryDelay}ms (attempt ${this.retryCount}/${this.maxRetries})`
             );
             await wait(this.retryDelay);
@@ -1113,7 +1226,7 @@ class ServerStateMachine {
             break;
 
           case 'RETRYING_CONNECTION':
-            console.log(
+            logger.log(
               `Retrying connection in ${this.retryDelay}ms (attempt ${this.retryCount}/${this.maxRetries})`
             );
             await wait(this.retryDelay);
@@ -1121,7 +1234,7 @@ class ServerStateMachine {
             break;
 
           case 'CONNECTED':
-            console.log('Server connected successfully. Running...');
+            logger.log('Server connected successfully. Running...');
             // In connected state, we wait for external events (handled by exit watchdog)
             // Use a more efficient event-driven approach instead of polling
             await new Promise((resolve) => {
@@ -1147,21 +1260,21 @@ class ServerStateMachine {
             break;
 
           case 'RECONNECTING':
-            console.log('Attempting to reconnect...');
+            logger.log('Attempting to reconnect...');
             await this.cleanup();
             this.retryCount = 0;
             this.transition('CREATING_SERVER');
             break;
 
           case 'RESTARTING':
-            console.log('Max connection retries reached. Restarting server...');
+            logger.log('Max connection retries reached. Restarting server...');
             await this.cleanup();
             this.retryCount = 0;
             this.transition('CREATING_SERVER');
             break;
 
           case 'FAILED':
-            console.error('Server failed permanently. Exiting...');
+            logger.crash('Server failed permanently. Exiting...');
             await this.cleanup();
             process.exit(1);
             break;
@@ -1172,11 +1285,14 @@ class ServerStateMachine {
             return;
 
           default:
-            console.error(`Unknown state: ${this.state}`);
+            logger.error(`Unknown state: ${this.state}`);
             this.transition('FAILED', { reason: 'Unknown state' });
         }
       } catch (error) {
-        console.error('Unexpected error in state machine:', error);
+        logger.error('Unexpected error in state machine:', {
+          error: error.message,
+          stack: error.stack,
+        });
         await this.handleError(error, `state ${this.state}`);
       }
     }
