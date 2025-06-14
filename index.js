@@ -865,15 +865,32 @@ var package_default = {
  * 6. Reliability - prevents race conditions and ensures proper shutdown
  */
 class ServerStateMachine {
-  constructor() {
+  constructor(config = {}) {
     this.state = 'INITIALIZING';
     this.server = null;
     this.transport = null;
     this.retryCount = 0;
-    this.maxRetries = 3;
-    this.retryDelay = 5000;
+    // Make configuration configurable
+    this.maxRetries = config.maxRetries || 3;
+    this.retryDelay = config.retryDelay || 5000;
+    this.maxStateHistory = config.maxStateHistory || 100;
     this.isShuttingDown = false;
     this.stateHistory = [];
+
+    // Define valid state transitions for validation
+    this.validTransitions = {
+      'INITIALIZING': ['CREATING_SERVER'],
+      'CREATING_SERVER': ['CONNECTING', 'RETRYING_SERVER_CREATION', 'FAILED'],
+      'RETRYING_SERVER_CREATION': ['CREATING_SERVER'],
+      'CONNECTING': ['CONNECTED', 'RETRYING_CONNECTION', 'FAILED'],
+      'RETRYING_CONNECTION': ['CONNECTING', 'RESTARTING'],
+      'CONNECTED': ['RECONNECTING', 'SHUTTING_DOWN'],
+      'RECONNECTING': ['CREATING_SERVER'],
+      'RESTARTING': ['CREATING_SERVER'],
+      'SHUTTING_DOWN': ['SHUTDOWN'],
+      'SHUTDOWN': [],
+      'FAILED': [],
+    };
 
     // Bind methods to preserve 'this' context
     this.transition = this.transition.bind(this);
@@ -881,14 +898,27 @@ class ServerStateMachine {
     this.cleanup = this.cleanup.bind(this);
   }
 
-  // State transition with logging and history
+  // State transition with logging, history, and validation
   transition(newState, context = {}) {
     const previousState = this.state;
+
+    // Validate transition
+    if (!this.validTransitions[previousState]?.includes(newState)) {
+      console.warn(`Invalid state transition: ${previousState} -> ${newState}`);
+      // Allow it but log the warning
+    }
+
+    // Limit state history size to prevent memory leaks
+    if (this.stateHistory.length >= this.maxStateHistory) {
+      this.stateHistory.shift();
+    }
+
     this.stateHistory.push({
       from: previousState,
       to: newState,
       timestamp: new Date().toISOString(),
       context,
+      retryCount: this.retryCount,
     });
 
     this.state = newState;
@@ -902,10 +932,22 @@ class ServerStateMachine {
 
   // Centralized error handling with state-aware logic
   async handleError(error, currentOperation) {
+    const errorContext = {
+      message: error.message,
+      stack: error.stack,
+      operation: currentOperation,
+      timestamp: new Date().toISOString(),
+      currentRetryCount: this.retryCount,
+    };
+
     console.error(`Error in ${currentOperation}:`, error.message);
+    console.debug('Error details:', errorContext);
 
     if (this.isShuttingDown) {
-      this.transition('SHUTDOWN', { reason: 'Error during shutdown' });
+      this.transition('SHUTDOWN', {
+        reason: 'Error during shutdown',
+        errorContext,
+      });
       return;
     }
 
@@ -915,12 +957,13 @@ class ServerStateMachine {
           this.retryCount++;
           this.transition('RETRYING_SERVER_CREATION', {
             attempt: this.retryCount,
-            error: error.message,
+            maxRetries: this.maxRetries,
+            errorContext,
           });
         } else {
           this.transition('FAILED', {
             reason: 'Max server creation retries exceeded',
-            error: error.message,
+            errorContext,
           });
         }
         break;
@@ -930,27 +973,30 @@ class ServerStateMachine {
           this.retryCount++;
           this.transition('RETRYING_CONNECTION', {
             attempt: this.retryCount,
-            error: error.message,
+            maxRetries: this.maxRetries,
+            errorContext,
           });
         } else {
           this.transition('RESTARTING', {
             reason: 'Max connection retries exceeded',
-            error: error.message,
+            errorContext,
           });
         }
         break;
 
       case 'CONNECTED':
+        // Reset retry count when transitioning from CONNECTED to handle new connection issues
+        this.retryCount = 0;
         this.transition('RECONNECTING', {
           reason: 'Connection lost',
-          error: error.message,
+          errorContext,
         });
         break;
 
       default:
         this.transition('FAILED', {
           reason: `Unexpected error in state ${this.state}`,
-          error: error.message,
+          errorContext,
         });
     }
   }
@@ -1077,17 +1123,26 @@ class ServerStateMachine {
           case 'CONNECTED':
             console.log('Server connected successfully. Running...');
             // In connected state, we wait for external events (handled by exit watchdog)
-            // This prevents the loop from spinning
+            // Use a more efficient event-driven approach instead of polling
             await new Promise((resolve) => {
-              // This will be resolved by shutdown or error handlers
-              const checkShutdown = () => {
+              const stateChangeHandler = () => {
                 if (this.isShuttingDown || this.state !== 'CONNECTED') {
                   resolve(undefined);
-                } else {
-                  setTimeout(checkShutdown, 1000);
                 }
               };
-              checkShutdown();
+
+              // Check every 5 seconds instead of every second to reduce CPU usage
+              const intervalId = setInterval(stateChangeHandler, 5000);
+
+              // Initial check
+              stateChangeHandler();
+
+              // Cleanup interval when promise resolves
+              const originalResolve = resolve;
+              resolve = (value) => {
+                clearInterval(intervalId);
+                originalResolve(value);
+              };
             });
             break;
 
@@ -1164,6 +1219,73 @@ async function createServer() {
     resources,
   });
 }
+
+/**
+ * Server State Machine Diagram
+ * ============================
+ *
+ * This diagram shows the state transitions in the ServerStateMachine:
+ *
+ *     ┌─────────────────┐
+ *     │   INITIALIZING  │
+ *     └─────────┬───────┘
+ *               │
+ *               ▼
+ *     ┌─────────────────┐    ┌───────────────────────────┐
+ *     │ CREATING_SERVER │◄───┤ RETRYING_SERVER_CREATION  │
+ *     └─────┬───────────┘    └─────────▲─────────────────┘
+ *           │                          │
+ *           ▼                          │ (retry if < maxRetries)
+ *     ┌─────────────────┐              │
+ *     │   CONNECTING    │              │
+ *     └─────┬───────────┘              │
+ *           │                          │
+ *           ▼                          │
+ *     ┌─────────────────┐    ┌────────────────────────┐  │
+ *     │   CONNECTED     │    │ RETRYING_CONNECTION    │  │
+ *     └─────┬───────────┘    └──────▲─────────────────┘  │
+ *           │                       │                    │
+ *           │ (connection lost)     │ (retry if < max)   │
+ *           ▼                       │                    │
+ *     ┌─────────────────┐           │                    │
+ *     │  RECONNECTING   │───────────┘                    │
+ *     └─────┬───────────┘                                │
+ *           │                                            │
+ *           └─────────────┐                              │
+ *                         ▼                              │
+ *     ┌─────────────────┐           ┌─────────────────┐  │
+ *     │   RESTARTING    │──────────►│     FAILED      │──┘
+ *     └─────┬───────────┘           └─────────────────┘
+ *           │                             ▲
+ *           └─────────────────────────────┘
+ *                         │
+ *                         │ (max retries exceeded)
+ *
+ *     Exit Signals (SIGTERM, SIGINT, etc.)
+ *                │
+ *                ▼
+ *     ┌─────────────────┐
+ *     │ SHUTTING_DOWN   │
+ *     └─────┬───────────┘
+ *           │
+ *           ▼
+ *     ┌─────────────────┐
+ *     │    SHUTDOWN     │
+ *     └─────────────────┘
+ *
+ * State Descriptions:
+ * - INITIALIZING: Initial state at startup
+ * - CREATING_SERVER: Attempting to create MCP server instance
+ * - RETRYING_SERVER_CREATION: Waiting before retrying server creation
+ * - CONNECTING: Attempting to connect server to transport (stdio)
+ * - RETRYING_CONNECTION: Waiting before retrying connection
+ * - CONNECTED: Successfully running and handling requests
+ * - RECONNECTING: Connection lost, attempting to reconnect
+ * - RESTARTING: Max connection retries exceeded, performing full restart
+ * - SHUTTING_DOWN: Graceful shutdown initiated
+ * - SHUTDOWN: Shutdown complete
+ * - FAILED: Permanent failure, process will exit
+ */
 program
   .version('Version ' + package_default.version)
   .name(package_default.name)
