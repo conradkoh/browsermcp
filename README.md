@@ -1,3 +1,3 @@
 # Browser MCP 2
 
-This is a fork [@browsermcp/mcp](https://www.npmjs.com/package/@browsermcp/mcp) of that fixes some reliability issues.
+This is a fork of [@browsermcp/mcp](https://www.npmjs.com/package/@browsermcp/mcp) that fixes some reliability issues.
