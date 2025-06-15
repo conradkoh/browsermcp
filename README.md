@@ -11,7 +11,7 @@ Add this to the mcp.json file
   "mcpServers": {
     "browsermcp": {
       "command": "npx",
-      "args": ["@conradkoh/browsermcp2@latest"]
+      "args": ["@conradkoh/browsermcp@latest"]
     }
   }
 }
@@ -40,3 +40,9 @@ To find and view the logs:
     ```bash
     cat $(find /var/folders /tmp -name "browsermcp-*.log" 2>/dev/null -print0 | xargs -0 ls -t | head -n 1)
     ```
+
+## Improvements
+
+1.  **Improved logging:** Logs are now more reliably written to a temporary directory.
+2.  **Enhanced exit code handling:** Implemented a finite state machine for better management of exit codes.
+3.  **(WIP) Browser Gateway for multi-instance stability:** A browser gateway has been added to resolve conflicts when multiple MCP servers connect to the browser, preventing crashes that previously required server restarts.
