@@ -345,7 +345,7 @@ export class ServerStateMachine {
         await this.cleanup();
         this.transition('SHUTDOWN', { signal });
         logger.log('Server closed successfully');
-        console.error(
+        logger.error(
           `Exiting. Full logs available at: ${logger.getLogFilePath()}`
         );
         process.exit(0);
@@ -354,7 +354,7 @@ export class ServerStateMachine {
           error: error.message,
           stack: error.stack,
         });
-        console.error(
+        logger.error(
           `Exiting with error. Full logs available at: ${logger.getLogFilePath()}`
         );
         process.exit(1);
@@ -373,7 +373,7 @@ export class ServerStateMachine {
         // Set timeout to prevent hanging
         setTimeout(() => {
           logger.log('Forced exit after timeout');
-          console.error(
+          logger.error(
             `Forced exit after timeout. Full logs available at: ${logger.getLogFilePath()}`
           );
           process.exit(0);
