@@ -70,7 +70,7 @@ export class ProxyServer {
       }
       
       if (detection.exists && !detection.healthy) {
-        logger.warn('Existing proxy found but unhealthy, starting new proxy server');
+        logger.log('Existing proxy found but unhealthy, starting new proxy server');
       }
       
       // Start new proxy server

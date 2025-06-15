@@ -23,7 +23,7 @@
 
 import { program } from 'commander';
 import { appConfig } from './config/app.config.js';
-import { createServerWithTools } from './server/index.js';
+import { createServerWithTools, createForwardingMcpServer } from './server/index.js';
 import { ServerStateMachine } from './server/state-machine.js';
 import { navigate, goBack, goForward, pressKey, wait } from './tools/common.js';
 import { getConsoleLogs, screenshot } from './tools/custom.js';
@@ -41,6 +41,7 @@ import { logger } from './utils/logger.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import http from 'http';
 
 // Resolve package.json path relative to this file
 const __filename = fileURLToPath(import.meta.url);
@@ -48,6 +49,70 @@ const __dirname = dirname(__filename);
 const packageJson = JSON.parse(
   readFileSync(join(__dirname, '../package.json'), 'utf8')
 );
+
+/**
+ * Helper function to make HTTP requests to the proxy server.
+ * 
+ * @async
+ * @function makeProxyRequest
+ * @param {string} toolName - Name of the tool to execute
+ * @param {Object} args - Arguments to pass to the tool
+ * @returns {Promise<Object>} Tool execution result
+ */
+async function makeProxyRequest(toolName, args) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify({
+      name: toolName,
+      arguments: args,
+    });
+    
+    const options = {
+      hostname: 'localhost',
+      port: 9008,
+      path: '/tool',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+    };
+    
+    const req = http.request(options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          const result = JSON.parse(data);
+          
+          if (res.statusCode !== 200) {
+            reject(new Error(`Proxy server error: ${res.statusCode} ${res.statusMessage}`));
+            return;
+          }
+          
+          if (!result.success) {
+            reject(new Error(result.message || 'Tool execution failed'));
+            return;
+          }
+          
+          resolve(result.result);
+        } catch (error) {
+          reject(new Error(`Failed to parse proxy response: ${error.message}`));
+        }
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(new Error(`Proxy communication error: ${error.message}`));
+    });
+    
+    req.write(postData);
+    req.end();
+  });
+}
 
 // ============================================================================
 // TOOL COLLECTIONS
@@ -105,26 +170,52 @@ const snapshotTools = [
 const resources = [];
 
 /**
- * Factory function for creating configured MCP server instances.
- * This function encapsulates server creation with all tools and resources,
- * providing a clean interface for the state machine.
+ * Factory function for creating MCP server instances.
+ * Creates different server types based on whether a proxy server exists:
+ * - If no proxy: Creates server with WebSocket for proxy functionality
+ * - If proxy exists: Creates forwarding server that communicates with proxy
  * 
  * @async
  * @function createServer
+ * @param {boolean} [useProxy=false] - Whether to create a forwarding server for existing proxy
  * @returns {Promise<Server>} Configured MCP server instance
- * 
- * @example
- * // Used by state machine to create server instances
- * const server = await createServer();
- * await server.connect(transport);
  */
-async function createServer() {
-  return createServerWithTools({
-    name: appConfig.name,
-    version: packageJson.version,
-    tools: snapshotTools,
-    resources,
-  });
+async function createServer(useProxy = false) {
+  // Create proxy-forwarding tools that send requests to the proxy server
+  const proxyTools = snapshotTools.map(tool => ({
+    schema: tool.schema,
+    handle: async (context, args) => {
+      // Forward tool call to proxy server via HTTP API
+      try {
+        const result = await makeProxyRequest(tool.schema.name, args);
+        return result;
+      } catch (error) {
+        // Return MCP-formatted error response
+        return {
+          content: [{ type: 'text', text: `Proxy communication error: ${error.message}` }],
+          isError: true,
+        };
+      }
+    },
+  }));
+  
+  if (useProxy) {
+    // Create forwarding MCP server (no WebSocket) that forwards to proxy
+    return createForwardingMcpServer({
+      name: appConfig.name,
+      version: packageJson.version,
+      tools: proxyTools,
+      resources,
+    });
+  } else {
+    // Create full MCP server with WebSocket for proxy functionality
+    return createServerWithTools({
+      name: appConfig.name,
+      version: packageJson.version,
+      tools: snapshotTools,
+      resources,
+    });
+  }
 }
 
 /**
@@ -205,8 +296,8 @@ async function createServer() {
  * Unified startup logic for Browser MCP server.
  * Implements the expected flow:
  * 1. Check for existing proxy server
- * 2. If proxy exists and is healthy: Use existing proxy
- * 3. If no proxy exists: Start new proxy server with MCP integration
+ * 2. If proxy exists and is healthy: Start MCP server that communicates with proxy
+ * 3. If no proxy exists: Start new proxy server + MCP server
  * 
  * @async
  * @function startBrowserMcp
@@ -225,40 +316,23 @@ async function startBrowserMcp() {
     logger.log(`   HTTP API: ${config.endpoints.health}`);
     logger.log(`   Tool endpoint: ${config.endpoints.tool}`);
     logger.log(`   Browser WebSocket: ws://localhost:${config.MCP_PORT}`);
-    logger.log('🚀 Browser MCP is ready to use existing proxy');
-    logger.log('💡 Press Ctrl+C to exit');
     
-    // Keep process running and monitor proxy health
-    const keepAlive = setInterval(async () => {
-      // Periodic health check to ensure proxy is still running
-      const stillRunning = await isProxyRunning();
-      if (!stillRunning) {
-        logger.log('⚠️  Proxy server is no longer available');
-        logger.log('🔄 You may want to restart to create a new proxy server');
-        // Could automatically restart here, but for now just warn
-      }
-    }, 30000); // Check every 30 seconds
+    // Start MCP server that communicates with existing proxy
+    logger.log('🔌 Starting MCP server with stdio transport (connects to existing proxy)...');
     
-    // Handle graceful shutdown
-    process.on('SIGINT', () => {
-      logger.log('\n👋 Browser MCP client shutting down...');
-      clearInterval(keepAlive);
-      process.exit(0);
+    const stateMachine = new ServerStateMachine({
+      createServer: () => createServer(true), // Use proxy forwarding
+      maxRetries: 3,
+      retryDelay: 2000,
     });
     
-    process.on('SIGTERM', () => {
-      logger.log('\n👋 Browser MCP client shutting down...');
-      clearInterval(keepAlive);
-      process.exit(0);
-    });
-    
-    // Keep the function from returning so the process stays alive
-    return new Promise(() => {}); // Never resolves, keeps process alive
+    await stateMachine.run();
+    return;
   }
   
   logger.log('🔍 No existing proxy detected, starting new proxy server...');
   
-  // Start new proxy server with full MCP integration
+  // Start new proxy server
   const proxy = new ProxyServer({
     tools: snapshotTools,
     resources,
@@ -277,7 +351,17 @@ async function startBrowserMcp() {
     logger.log(`   Browser WebSocket: ws://localhost:${result.ports.mcp}`);
     logger.log(`   Tools: ${result.tools} available`);
     logger.log(`   Resources: ${result.resources} available`);
-    logger.log('🚀 Browser MCP proxy server is ready');
+    
+    // Now start MCP server that communicates with the new proxy
+    logger.log('🔌 Starting MCP server with stdio transport (connects to new proxy)...');
+    
+    const stateMachine = new ServerStateMachine({
+      createServer: () => createServer(true), // Use proxy forwarding
+      maxRetries: 3,
+      retryDelay: 2000,
+    });
+    
+    await stateMachine.run();
   } else {
     logger.log('ℹ️  Using existing proxy server');
   }

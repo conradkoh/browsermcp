@@ -16,14 +16,24 @@
 import { createServerWithTools } from '../server/index.js';
 import { PROXY_CONFIG } from './detection.js';
 import { Context } from '../context.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * MCP Handler class that manages MCP server integration.
  * Provides methods for tool execution and server management.
+ * Supports both WebSocket (for browser) and stdio (for IDE) transports.
  */
 export class McpHandler {
   constructor(options = {}) {
-    this.server = null;
+    this.webSocketServer = null;  // Server with WebSocket for browser communication
+    this.stdioServer = null;      // Server with stdio for IDE communication
     this.context = null;
     this.tools = options.tools || [];
     this.resources = options.resources || [];
@@ -37,72 +47,69 @@ export class McpHandler {
   }
   
   /**
-   * Initialize the MCP server with browser WebSocket integration.
-   * This creates the MCP server that will handle browser connections on port 9009.
+   * Initialize WebSocket MCP server for browser communication.
+   * This creates the WebSocket server for browser connections on port 9009.
    * 
    * @async
    * @function initialize
    * @returns {Promise<void>} Resolves when server is initialized
-   * 
-   * @example
-   * const handler = new McpHandler({ tools, resources });
-   * await handler.initialize();
    */
   async initialize() {
     try {
-      // Create context for managing browser connections
+      // Create shared context for managing browser connections
       this.context = new Context();
       
-      // Create MCP server with tools and resources
-      // This server includes WebSocket server for browser communication
-      this.server = await createServerWithTools({
+      // Create WebSocket server for browser communication *re-using the same
+      // context* so that HTTP tool invocations and browser WebSocket updates
+      // operate on identical state.
+      this.webSocketServer = await createServerWithTools({
         name: this.serverConfig.name || 'Browser MCP Proxy',
         version: this.serverConfig.version || '1.0.0',
         tools: this.tools,
         resources: this.resources,
+        context: this.context,
       });
       
-      // The server is now ready to handle browser connections on port 9009
-      // and MCP protocol requests through the proxy
+      // Note: stdio server is only created in direct IDE mode, not in proxy mode
       
     } catch (error) {
       throw new Error(`Failed to initialize MCP server: ${error.message}`);
     }
   }
   
-     /**
-    * Execute a tool call through the MCP server.
-    * 
-    * @async
-    * @function executeToolCall
-    * @param {string} toolName - Name of the tool to execute
-    * @param {Object} args - Arguments to pass to the tool
-    * @returns {Promise<Object>} Tool execution result
-    * 
-    * @example
-    * const result = await handler.executeToolCall('navigate', { url: 'https://example.com' });
-    */
-   async executeToolCall(toolName, args = {}) {
-     // Handle special internal tool calls
-     if (toolName === '__list_tools__') {
-       return this.listTools();
-     }
-     
-     // Find the tool in our tool map
-     const tool = this.toolMap.get(toolName);
-     if (!tool) {
-       throw new Error(`Tool "${toolName}" not found. Available tools: ${Array.from(this.toolMap.keys()).join(', ')}`);
-     }
-     
-     try {
-       // Use the real browser context for tool execution
-       const result = await tool.handle(this.context, args);
-       
-       return result;
-     } catch (error) {
-       throw new Error(`Tool execution failed: ${error.message}`);
-     }
-   }
+  /**
+   * Execute a tool call through the MCP server.
+   * 
+   * @async
+   * @function executeToolCall
+   * @param {string} toolName - Name of the tool to execute
+   * @param {Object} args - Arguments to pass to the tool
+   * @returns {Promise<Object>} Tool execution result
+   * 
+   * @example
+   * const result = await handler.executeToolCall('navigate', { url: 'https://example.com' });
+   */
+  async executeToolCall(toolName, args = {}) {
+    // Handle special internal tool calls
+    if (toolName === '__list_tools__') {
+      return this.listTools();
+    }
+    
+    // Find the tool in our tool map
+    const tool = this.toolMap.get(toolName);
+    if (!tool) {
+      throw new Error(`Tool "${toolName}" not found. Available tools: ${Array.from(this.toolMap.keys()).join(', ')}`);
+    }
+    
+    try {
+      // Use the real browser context for tool execution
+      const result = await tool.handle(this.context, args);
+      
+      return result;
+    } catch (error) {
+      throw new Error(`Tool execution failed: ${error.message}`);
+    }
+  }
   
   /**
    * List all available tools and their schemas.
@@ -152,7 +159,7 @@ export class McpHandler {
    */
   getHealthInfo() {
     return {
-      status: this.server ? 'connected' : 'disconnected',
+      status: this.webSocketServer ? 'connected' : 'disconnected',
       toolCount: this.tools.length,
       resourceCount: this.resources.length,
       availableTools: Array.from(this.toolMap.keys()),
@@ -170,14 +177,19 @@ export class McpHandler {
    */
   async shutdown() {
     try {
-      if (this.server) {
-        await this.server.close();
-        this.server = null;
+      if (this.webSocketServer) {
+        await this.webSocketServer.close();
+        this.webSocketServer = null;
       }
       
       if (this.context) {
         await this.context.close();
         this.context = null;
+      }
+      
+      if (this.stdioServer) {
+        await this.stdioServer.close();
+        this.stdioServer = null;
       }
       
       this.toolMap.clear();
