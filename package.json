@@ -2,10 +2,12 @@
   "name": "@conradkoh/browsermcp",
   "version": "1.0.18",
   "description": "",
-  "main": "index.js",
-  "scripts": {},
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
   "bin": {
-    "mcp-server-browsermcp": "index.js"
+    "mcp-server-browsermcp": "src/index.js"
   },
   "repository": {
     "type": "git",
