@@ -37,36 +37,43 @@ class Logger {
    * @constructor
    */
   constructor() {
-    // Create temp file for logging
-    const tempDir = os.tmpdir();
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    // Check if we're running as a forked child process
+    this.isChildProcess = process.send !== undefined;
     
-    /**
-     * Path to the log file for this logger instance.
-     * Format: browsermcp-{timestamp}-{pid}.log
-     * 
-     * @type {string}
-     * @private
-     */
-    this.logFile = path.join(
-      tempDir,
-      `browsermcp-${timestamp}-${process.pid}.log`
-    );
-
-    // Initialize log file with header information
-    try {
-      fs.writeFileSync(
-        this.logFile,
-        `Browser MCP Server Log - Started at ${new Date().toISOString()}\n`
+    // Create temp file for logging (unless we're a child process)
+    if (!this.isChildProcess) {
+      const tempDir = os.tmpdir();
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      
+      /**
+       * Path to the log file for this logger instance.
+       * Format: browsermcp-{timestamp}-{pid}.log
+       * 
+       * @type {string}
+       * @private
+       */
+      this.logFile = path.join(
+        tempDir,
+        `browsermcp-${timestamp}-${process.pid}.log`
       );
-      fs.writeFileSync(this.logFile, `Process ID: ${process.pid}\n`, {
-        flag: 'a',
-      });
-      fs.writeFileSync(this.logFile, `Log file: ${this.logFile}\n\n`, {
-        flag: 'a',
-      });
-    } catch (error) {
-      console.error('Failed to initialize log file:', error.message);
+
+      // Initialize log file with header information
+      try {
+        fs.writeFileSync(
+          this.logFile,
+          `Browser MCP Server Log - Started at ${new Date().toISOString()}\n`
+        );
+        fs.writeFileSync(this.logFile, `Process ID: ${process.pid}\n`, {
+          flag: 'a',
+        });
+        fs.writeFileSync(this.logFile, `Log file: ${this.logFile}\n\n`, {
+          flag: 'a',
+        });
+      } catch (error) {
+        console.error('Failed to initialize log file:', error.message);
+      }
+    } else {
+      this.logFile = null; // No log file for child processes
     }
   }
 
@@ -74,6 +81,8 @@ class Logger {
    * Logs a message with optional context to the log file only.
    * This is the primary logging method for general application events.
    * Does not write to console to avoid interfering with MCP protocol.
+   * 
+   * Child processes skip all logging to prevent interference.
    * 
    * @method log
    * @param {string} message - The main log message
@@ -84,6 +93,11 @@ class Logger {
    * logger.log('User action completed', { userId: 123, action: 'click' });
    */
   log(message, context = {}) {
+    // Skip logging entirely for child processes
+    if (this.isChildProcess || !this.logFile) {
+      return;
+    }
+
     const timestamp = new Date().toISOString();
     const logEntry = `[${timestamp}] ${message}${
       context && Object.keys(context).length > 0
@@ -94,9 +108,11 @@ class Logger {
     try {
       fs.writeFileSync(this.logFile, logEntry, { flag: 'a' });
     } catch (error) {
-      // If we can't write to log file, fall back to stderr
-      console.error('Failed to write to log file:', error.message);
-      console.error('Original message:', message);
+      // If we can't write to log file, fall back to stderr (only if not a child process)
+      if (!this.isChildProcess) {
+        console.error('Failed to write to log file:', error.message);
+        console.error('Original message:', message);
+      }
     }
   }
 
@@ -104,6 +120,9 @@ class Logger {
    * Logs an error message to both the log file and stderr.
    * Used for errors that should be visible to users/administrators
    * while still maintaining a permanent record in the log file.
+   * 
+   * When running in MCP mode or as a child process, stderr output is suppressed 
+   * to avoid interfering with the MCP protocol.
    * 
    * @method error
    * @param {string} message - The error message
@@ -114,13 +133,25 @@ class Logger {
    * logger.error('Validation failed', { field: 'email', value: 'invalid' });
    */
   error(message, context = {}) {
-    // Log to temp file with ERROR prefix
+    // Log to temp file with ERROR prefix (skip if child process)
     this.log(`ERROR: ${message}`, context);
 
-    // Also log to stderr for immediate visibility
-    console.error(message);
-    if (context && Object.keys(context).length > 0) {
-      console.error('Error context:', context);
+    // Skip stderr output for child processes and MCP mode
+    if (this.isChildProcess) {
+      return;
+    }
+
+    // Check if we're running in MCP mode by looking at command line args
+    // In MCP mode, avoid stderr output to prevent protocol interference
+    const isMcpMode = process.argv.some(arg => arg.includes('browsermcp')) && 
+                      process.stdin.isTTY === false;
+    
+    if (!isMcpMode) {
+      // Also log to stderr for immediate visibility (only if not in MCP mode)
+      console.error(message);
+      if (context && Object.keys(context).length > 0) {
+        console.error('Error context:', context);
+      }
     }
   }
 
@@ -129,7 +160,7 @@ class Logger {
    * Useful for displaying log file location to users or for log rotation.
    * 
    * @method getLogFilePath
-   * @returns {string} The absolute path to the log file
+   * @returns {string|null} The absolute path to the log file, or null if no log file (child process)
    * 
    * @example
    * console.log(`Logs available at: ${logger.getLogFilePath()}`);
@@ -143,6 +174,8 @@ class Logger {
    * This method is used for unrecoverable errors that will cause the
    * application to exit. It ensures crash details are preserved and
    * users know where to find the full logs.
+   * 
+   * Child processes skip stderr output to prevent protocol interference.
    * 
    * @method crash
    * @param {string} message - Description of the crash
@@ -166,15 +199,22 @@ class Logger {
       processId: process.pid,
     };
 
-    // Log crash details to temp file with CRASH prefix
+    // Log crash details to temp file with CRASH prefix (skip if child process)
     this.log(`CRASH: ${message}`, crashInfo);
+
+    // Skip stderr output for child processes
+    if (this.isChildProcess) {
+      return;
+    }
 
     // Output to stderr for immediate visibility
     console.error(`FATAL ERROR: ${message}`);
     if (error) {
       console.error('Error details:', error.message);
     }
-    console.error(`Full logs available at: ${this.logFile}`);
+    if (this.logFile) {
+      console.error(`Full logs available at: ${this.logFile}`);
+    }
   }
 }
 

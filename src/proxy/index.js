@@ -267,5 +267,16 @@ export async function startProxy() {
 
 // If this file is run directly, start the proxy server
 if (process.argv[1] === new URL(import.meta.url).pathname) {
-  startProxy();
+  (async () => {
+    try {
+      await startProxy();
+      // Signal the parent process that the server is ready
+      if (process.send) {
+        process.send('ready');
+      }
+    } catch (error) {
+      logger.error('Failed to start proxy server in forked process:', error);
+      process.exit(1); // Exit with error code
+    }
+  })();
 } 

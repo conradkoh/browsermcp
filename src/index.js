@@ -301,33 +301,59 @@ async function runDiscoveryServerOnce() {
   // Start the discovery server as a child process
   const discoveryProcess = fork('./src/discovery/index.js', [], {
     silent: true, // Keep child process output separate
-    env: { PORT: DISCOVERY_SERVER_PORT },
+    env: { 
+      PORT: DISCOVERY_SERVER_PORT,
+      NODE_ENV: 'production' // Suppress additional logging
+    }
   });
 
-  // Optional: You can listen to process messages or errors if needed
-  discoveryProcess.on('error', (err) => {
-    logger.error('Discovery server child process error:', err);
+  // Set up promise to wait for 'ready' message from child process
+  const readyPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`Discovery server did not send ready signal within the expected time.`));
+    }, 5000); // 5 second timeout
+
+    discoveryProcess.on('message', (message) => {
+      if (message === 'ready') {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+
+    discoveryProcess.on('error', (err) => {
+      clearTimeout(timeout);
+      logger.error('Discovery server child process error:', err);
+      reject(err);
+    });
+
+    discoveryProcess.on('exit', (code, signal) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(`Discovery server child process exited with code ${code} and signal ${signal}`));
+      }
+    });
   });
 
-  discoveryProcess.on('exit', (code, signal) => {
-    logger.log(
-      `Discovery server child process exited with code ${code} and signal ${signal}`
-    );
-  });
+  try {
+    await readyPromise;
+    logger.log(`Discovery server is now active on port ${DISCOVERY_SERVER_PORT}`);
+  } catch (error) {
+    // If ready message fails, fall back to port polling
+    logger.log('Falling back to port polling for discovery server...');
+    
+    let attempts = 0;
+    const maxAttempts = 30; // Try for up to 3 seconds (30 * 100ms)
+    while (attempts < maxAttempts && !(await isPortInUse(DISCOVERY_SERVER_PORT))) {
+      attempts++;
+      await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms before next check
+    }
 
-  // Poll until the discovery server port is in use
-  let attempts = 0;
-  const maxAttempts = 20; // Try for up to 2 seconds (20 * 100ms)
-  while (attempts < maxAttempts && !(await isPortInUse(DISCOVERY_SERVER_PORT))) {
-    attempts++;
-    await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms before next check
+    if (!(await isPortInUse(DISCOVERY_SERVER_PORT))) {
+      throw new Error(`Discovery server did not start on port ${DISCOVERY_SERVER_PORT} within the expected time.`);
+    }
+
+    logger.log(`Discovery server is now active on port ${DISCOVERY_SERVER_PORT}`);
   }
-
-  if (!(await isPortInUse(DISCOVERY_SERVER_PORT))) {
-    throw new Error(`Discovery server did not start on port ${DISCOVERY_SERVER_PORT} within the expected time.`);
-  }
-
-  logger.log(`Discovery server is now active on port ${DISCOVERY_SERVER_PORT}`);
 }
 
 async function runProxyServerOnce() {
@@ -343,32 +369,58 @@ async function runProxyServerOnce() {
   // Start the proxy server as a child process
   const proxyProcess = fork('./src/proxy/index.js', [], {
     silent: true, // Keep child process output separate
+    env: { 
+      NODE_ENV: 'production' // Suppress additional logging
+    }
   });
 
-  // Optional: You can listen to process messages or errors if needed
-  proxyProcess.on('error', (err) => {
-    logger.error('Proxy server child process error:', err);
+  // Set up promise to wait for 'ready' message from child process
+  const readyPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`Proxy server did not send ready signal within the expected time.`));
+    }, 5000); // 5 second timeout
+
+    proxyProcess.on('message', (message) => {
+      if (message === 'ready') {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+
+    proxyProcess.on('error', (err) => {
+      clearTimeout(timeout);
+      logger.error('Proxy server child process error:', err);
+      reject(err);
+    });
+
+    proxyProcess.on('exit', (code, signal) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(`Proxy server child process exited with code ${code} and signal ${signal}`));
+      }
+    });
   });
 
-  proxyProcess.on('exit', (code, signal) => {
-    logger.log(
-      `Proxy server child process exited with code ${code} and signal ${signal}`
-    );
-  });
+  try {
+    await readyPromise;
+    logger.log(`Proxy server is now active on port ${PROXY_PORT}`);
+  } catch (error) {
+    // If ready message fails, fall back to port polling
+    logger.log('Falling back to port polling for proxy server...');
+    
+    let attempts = 0;
+    const maxAttempts = 30; // Try for up to 3 seconds (30 * 100ms)
+    while (attempts < maxAttempts && !(await isPortInUse(PROXY_PORT))) {
+      attempts++;
+      await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms before next check
+    }
 
-  // Poll until the proxy server port is in use
-  let attempts = 0;
-  const maxAttempts = 20; // Try for up to 2 seconds (20 * 100ms)
-  while (attempts < maxAttempts && !(await isPortInUse(PROXY_PORT))) {
-    attempts++;
-    await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms before next check
+    if (!(await isPortInUse(PROXY_PORT))) {
+      throw new Error(`Proxy server did not start on port ${PROXY_PORT} within the expected time.`);
+    }
+
+    logger.log(`Proxy server is now active on port ${PROXY_PORT}`);
   }
-
-  if (!(await isPortInUse(PROXY_PORT))) {
-    throw new Error(`Proxy server did not start on port ${PROXY_PORT} within the expected time.`);
-  }
-
-  logger.log(`Proxy server is now active on port ${PROXY_PORT}`);
 }
 
 // ============================================================================
