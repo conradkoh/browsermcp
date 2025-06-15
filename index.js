@@ -148,6 +148,10 @@ class BrowserClient {
     try {
       this.ws = new WebSocket(`ws://localhost:${this.port}`);
       
+      // Set up event handlers BEFORE waiting for connection
+      // This ensures we can receive the handshake message immediately
+      this.setupEventHandlers();
+      
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error('Connection timeout'));
@@ -166,10 +170,8 @@ class BrowserClient {
           reject(error);
         });
       });
-
-      this.setupEventHandlers();
       
-      // Wait for handshake
+      // Wait for handshake - this should now work since handlers are set up
       await this.waitForHandshake();
       
     } catch (error) {
@@ -179,28 +181,34 @@ class BrowserClient {
   }
 
   setupEventHandlers() {
+    logger.log('Setting up WebSocket event handlers for BrowserClient');
+    
     this.ws.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString());
         this.handleMessage(message);
       } catch (error) {
-        logger.error('Error parsing server message:', { error: error.message });
+        logger.error('Error parsing server message:', { error: error.message, data: data.toString() });
       }
     });
 
-    this.ws.on('close', () => {
-      logger.log('Disconnected from browser server');
+    this.ws.on('close', (code, reason) => {
+      logger.log(`Disconnected from browser server - Code: ${code}, Reason: ${reason}`);
       this.isConnected = false;
       this.browserConnected = false;
       this.scheduleReconnect();
     });
 
     this.ws.on('error', (error) => {
-      logger.error('Browser client error:', { error: error.message });
+      logger.error('Browser client WebSocket error:', { error: error.message });
     });
+    
+    logger.log('WebSocket event handlers set up successfully');
   }
 
   handleMessage(message) {
+    logger.log('BrowserClient received message:', message);
+    
     switch (message.type) {
       case 'handshake':
         this.clientId = message.clientId;
@@ -214,7 +222,7 @@ class BrowserClient {
         break;
       
       default:
-        // Handle other message types if needed
+        logger.log(`Unhandled message type: ${message.type}`);
         break;
     }
   }
@@ -222,18 +230,21 @@ class BrowserClient {
   async waitForHandshake() {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        logger.error('Handshake timeout - no handshake message received within 5 seconds');
         reject(new Error('Handshake timeout'));
       }, 5000);
 
       const checkHandshake = () => {
         if (this.clientId !== null) {
           clearTimeout(timeout);
+          logger.log('Handshake successful, proceeding with connection');
           resolve(undefined);
         } else {
           setTimeout(checkHandshake, 100);
         }
       };
 
+      logger.log('Waiting for handshake message from server...');
       checkHandshake();
     });
   }
@@ -380,7 +391,19 @@ class BrowserConnectionServer {
   setupEventHandlers() {
     this.wss.on('connection', (ws, req) => {
       const userAgent = req.headers['user-agent'] || '';
-      const isBrowserExtension = userAgent.includes('Mozilla') || userAgent.includes('Chrome');
+      const origin = req.headers['origin'] || '';
+      
+      logger.log(`New WebSocket connection - User-Agent: "${userAgent}", Origin: "${origin}"`);
+      
+      // Browser extensions typically have chrome-extension:// or moz-extension:// origins
+      // Node.js WebSocket clients typically don't have Mozilla/Chrome in user agent when connecting from ws library
+      const isBrowserExtension = (
+        origin.startsWith('chrome-extension://') || 
+        origin.startsWith('moz-extension://') ||
+        (userAgent.includes('Mozilla') && userAgent.includes('Chrome') && !userAgent.includes('Node'))
+      );
+      
+      logger.log(`Connection classified as: ${isBrowserExtension ? 'Browser Extension' : 'MCP Client'}`);
       
       if (isBrowserExtension) {
         this.handleBrowserConnection(ws);
@@ -452,11 +475,14 @@ class BrowserConnectionServer {
     });
 
     // Send handshake response
-    ws.send(JSON.stringify({
+    const handshakeMessage = {
       type: 'handshake',
       clientId,
       browserConnected: !!this.browserConnection
-    }));
+    };
+    
+    logger.log(`Sending handshake to MCP client ${clientId}:`, handshakeMessage);
+    ws.send(JSON.stringify(handshakeMessage));
   }
 
   handleMcpClientMessage(clientId, message) {
@@ -963,18 +989,32 @@ async function createServerWithTools(options) {
     throw new Error('Failed to start browser connection server');
   }
 
-  // Connect to browser server
-  try {
-    await context.connect();
-    logger.log('Successfully connected to browser server');
-  } catch (error) {
-    logger.error('Failed to connect to browser server:', { error: error.message });
-    // Try to handle server failure and retry
-    const recovered = await serverManager.handleServerFailure();
-    if (recovered) {
+  // Connect to browser server with retry logic
+  let connectionAttempts = 0;
+  const maxConnectionAttempts = 3;
+  let connected = false;
+  
+  while (connectionAttempts < maxConnectionAttempts && !connected) {
+    try {
+      connectionAttempts++;
+      logger.log(`Attempting to connect to browser server (attempt ${connectionAttempts}/${maxConnectionAttempts})`);
       await context.connect();
-    } else {
-      throw new Error('Failed to establish connection to browser server');
+      connected = true;
+      logger.log('Successfully connected to browser server');
+    } catch (error) {
+      logger.error(`Connection attempt ${connectionAttempts} failed:`, { error: error.message });
+      
+      if (connectionAttempts < maxConnectionAttempts) {
+        logger.log('Handling server failure and retrying...');
+        const recovered = await serverManager.handleServerFailure();
+        if (!recovered) {
+          logger.error('Failed to recover server, will retry anyway');
+        }
+        // Wait a bit before retrying
+        await wait(1000);
+      } else {
+        throw new Error(`Failed to establish connection to browser server after ${maxConnectionAttempts} attempts`);
+      }
     }
   }
 
