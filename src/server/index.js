@@ -40,6 +40,7 @@ import { createWebSocketServer } from '../ws/index.js';
  * @param {string} options.version - Server version string
  * @param {Array<Object>} options.tools - Array of tool objects with schema and handle methods
  * @param {Array<Object>} options.resources - Array of resource objects with schema and read methods
+ * @param {string} options.port - WebSocket server port
  * @returns {Promise<Server>} Configured MCP server ready to handle requests
  * 
  * @example
@@ -48,7 +49,8 @@ import { createWebSocketServer } from '../ws/index.js';
  *   name: 'Browser MCP',
  *   version: '1.0.0',
  *   tools: [navigateTool, clickTool, typeTool],
- *   resources: [pageResource, historyResource]
+ *   resources: [pageResource, historyResource],
+ *   port: '8080'
  * });
  * 
  * @example
@@ -58,7 +60,7 @@ import { createWebSocketServer } from '../ws/index.js';
  * // Server is now ready to handle MCP requests
  */
 export async function createServerWithTools(options) {
-  const { name, version, tools, resources } = options;
+  const { name, version, tools, resources, port } = options;
   
   // Create context for managing browser connections
   const context = new Context();
@@ -77,7 +79,7 @@ export async function createServerWithTools(options) {
   );
   
   // Create WebSocket server for browser extension communication
-  const wss = await createWebSocketServer();
+  const wss = await createWebSocketServer(port);
   
   /**
    * Handle new WebSocket connections from browser extensions.

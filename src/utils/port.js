@@ -189,4 +189,28 @@ export function killProcessOnPort(port) {
       });
     }
   }
+}
+
+/**
+ * Finds an available port starting from a given port.
+ * @async
+ * @function findAvailablePort
+ * @param {number} startPort - The port number to start searching from.
+ * @returns {Promise<number>} An available port number.
+ * @throws {Error} If no available port is found within a reasonable range.
+ */
+export async function findAvailablePort(startPort) {
+  let port = startPort;
+  const maxPort = 65535;
+  const maxAttempts = 100; // Limit search to 100 ports
+  let attempts = 0;
+
+  while (attempts < maxAttempts && port <= maxPort) {
+    if (!(await isPortInUse(port))) {
+      return port;
+    }
+    port++;
+    attempts++;
+  }
+  throw new Error(`No available port found in range ${startPort}-${port - 1}`);
 } 

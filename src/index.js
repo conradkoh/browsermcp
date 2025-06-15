@@ -34,11 +34,17 @@ import {
   type,
   selectOption,
 } from './tools/snapshot.js';
+import { mcpConfig } from './config/mcp.config.js';
+import { startDiscoveryServer } from './discovery/index.js';
+import { fork } from 'child_process';
+import { isPortInUse, killProcessOnPort, findAvailablePort } from './utils/port.js';
 
 // Package metadata loading for version information
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import fetch from 'node-fetch';
+import { v4 as uuidv4 } from 'uuid';
 
 // Resolve package.json path relative to this file
 const __filename = fileURLToPath(import.meta.url);
@@ -46,6 +52,88 @@ const __dirname = dirname(__filename);
 const packageJson = JSON.parse(
   readFileSync(join(__dirname, '../package.json'), 'utf8')
 );
+
+// Unique ID for this server instance
+const serverId = uuidv4();
+
+// Discovery server URL (default to localhost:3000, can be overridden via CLI)
+let discoveryServerUrl = 'http://localhost:3000';
+
+// Current server port (set when server starts)
+let currentServerPort = null;
+
+/**
+ * Registers this server instance with the discovery server.
+ * @async
+ */
+async function registerWithDiscoveryServer(serverPort) {
+  try {
+    const response = await fetch(`${discoveryServerUrl}/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: serverId, address: 'localhost', port: serverPort }),
+    });
+    if (response.ok) {
+      console.log(`Registered server ${serverId} with discovery service.`);
+    } else {
+      console.error(`Failed to register server ${serverId}: ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error(`Error registering with discovery service: ${error.message}`);
+  }
+}
+
+/**
+ * Sends a heartbeat to the discovery server to keep this server active in the registry.
+ * @async
+ */
+async function sendHeartbeat() {
+  try {
+    const response = await fetch(`${discoveryServerUrl}/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: serverId }),
+    });
+    if (!response.ok) {
+      if (response.status === 404) {
+        // Server not found, need to re-register
+        console.log(`Server ${serverId} not found in discovery service, re-registering...`);
+        await registerWithDiscoveryServer(currentServerPort);
+      } else {
+        console.error(`Failed to send heartbeat for server ${serverId}: ${response.statusText}`);
+      }
+    }
+  } catch (error) {
+    console.error(`Error sending heartbeat to discovery service: ${error.message}`);
+    console.log('Attempting to restart discovery server...');
+    await runDiscoveryServerOnce(); // Attempt to restart discovery server
+    // After restarting discovery server, re-register this server
+    console.log('Re-registering with restarted discovery server...');
+    await registerWithDiscoveryServer(currentServerPort);
+  }
+}
+
+/**
+ * Fetches the list of active servers from the discovery server.
+ * @async
+ * @returns {Promise<Array<Object>>} An array of active server objects.
+ */
+async function getActiveServers() {
+  try {
+    const response = await fetch(`${discoveryServerUrl}/servers`);
+    if (response.ok) {
+      const servers = await response.json();
+      console.log('Active servers:', servers);
+      return servers;
+    } else {
+      console.error(`Failed to fetch active servers: ${response.statusText}`);
+      return [];
+    }
+  } catch (error) {
+    console.error(`Error fetching active servers: ${error.message}`);
+    return [];
+  }
+}
 
 // ============================================================================
 // TOOL COLLECTIONS
@@ -109,6 +197,7 @@ const resources = [];
  * 
  * @async
  * @function createServer
+ * @param {number} port - The port to run the WebSocket server on.
  * @returns {Promise<Server>} Configured MCP server instance
  * 
  * @example
@@ -116,12 +205,13 @@ const resources = [];
  * const server = await createServer();
  * await server.connect(transport);
  */
-async function createServer() {
+async function createServer(port) {
   return createServerWithTools({
     name: appConfig.name,
     version: packageJson.version,
     tools: snapshotTools,
     resources,
+    port: port,
   });
 }
 
@@ -194,6 +284,48 @@ async function createServer() {
  * - **FAILED**: Permanent failure, process will exit
  */
 
+async function runDiscoveryServerOnce() {
+  const DISCOVERY_SERVER_PORT = 3000;
+  // Check if discovery server is already running
+  if (await isPortInUse(DISCOVERY_SERVER_PORT)) {
+    console.log(`Discovery server already running on port ${DISCOVERY_SERVER_PORT}`);
+    return;
+  }
+
+  console.log('Discovery server not found, starting a new one...');
+
+  // Start the discovery server as a child process
+  const discoveryProcess = fork('./src/discovery/index.js', [], {
+    silent: true, // Keep child process output separate
+    env: { PORT: DISCOVERY_SERVER_PORT },
+  });
+
+  // Optional: You can listen to process messages or errors if needed
+  discoveryProcess.on('error', (err) => {
+    console.error('Discovery server child process error:', err);
+  });
+
+  discoveryProcess.on('exit', (code, signal) => {
+    console.log(
+      `Discovery server child process exited with code ${code} and signal ${signal}`
+    );
+  });
+
+  // Poll until the discovery server port is in use
+  let attempts = 0;
+  const maxAttempts = 20; // Try for up to 2 seconds (20 * 100ms)
+  while (attempts < maxAttempts && !(await isPortInUse(DISCOVERY_SERVER_PORT))) {
+    attempts++;
+    await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms before next check
+  }
+
+  if (!(await isPortInUse(DISCOVERY_SERVER_PORT))) {
+    throw new Error(`Discovery server did not start on port ${DISCOVERY_SERVER_PORT} within the expected time.`);
+  }
+
+  console.log(`Discovery server is now active on port ${DISCOVERY_SERVER_PORT}`);
+}
+
 // ============================================================================
 // COMMAND LINE INTERFACE
 // Setup using Commander.js for version display and execution
@@ -207,24 +339,67 @@ async function createServer() {
 program
   .version('Version ' + packageJson.version)
   .name(packageJson.name)
-  .description(appConfig.description)
-  /**
-   * Main action handler that starts the Browser MCP server.
-   * Creates and runs the state machine which manages the complete
-   * server lifecycle including creation, connection, error recovery,
-   * and graceful shutdown.
-   * 
-   * @async
-   */
+  .description(appConfig.description);
+
+/**
+ * Command to list all active Browser MCP servers registered with the discovery service.
+ * This allows users to see all available instances.
+ */
+program
+  .command('list-servers')
+  .description('List all active Browser MCP servers')
   .action(async () => {
+    await runDiscoveryServerOnce(); // Ensure discovery server is running
+    console.log('Fetching active servers...');
+    const activeServers = await getActiveServers();
+    if (activeServers.length > 0) {
+      console.log('--- Active Browser MCP Servers ---');
+      activeServers.forEach(server => {
+        console.log(`ID: ${server.id}, Address: ${server.address}:${server.port}`);
+      });
+      console.log('----------------------------------');
+    } else {
+      console.log('No active Browser MCP servers found.');
+    }
+  });
+
+/**
+ * Default command to start the Browser MCP server.
+ * Creates and runs the state machine which manages the complete
+ * server lifecycle including creation, connection, error recovery,
+ * and graceful shutdown.
+ */
+program
+  .command('start', { isDefault: true })
+  .description('Start the Browser MCP server')
+  .action(async () => {
+    // Ensure discovery server is running (or start it)
+    await runDiscoveryServerOnce();
+
+    // Find an available port for this Browser MCP server
+    const serverPort = await findAvailablePort(mcpConfig.defaultWsPort);
+    currentServerPort = serverPort; // Store for use in heartbeat function
+    console.log(`Browser MCP server will use port: ${serverPort}`);
+
     // Create state machine with server factory function
     const stateMachine = new ServerStateMachine({
-      createServer,
+      createServer: () => createServer(serverPort),
     });
     
+    // Register with discovery server on startup
+    await registerWithDiscoveryServer(serverPort);
+
+    // Start sending heartbeats periodically (e.g., every 10 seconds)
+    setInterval(sendHeartbeat, 10000);
+
     // Start the state machine - this will run until shutdown
     await stateMachine.run();
   });
+
+// Add option to specify discovery server URL
+program.option('--discovery-server-url <url>', 'URL of the discovery server', (url) => {
+  discoveryServerUrl = url;
+});
 
 // Parse command line arguments and execute
 program.parse(process.argv); 
