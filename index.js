@@ -106,571 +106,55 @@ function generateId() {
 
 // ../../packages/config/src/mcp.config.ts
 var mcpConfig = {
-  defaultWsPort: 9009, // Legacy port for backward compatibility
-  browserServerPort: 9008, // New dedicated browser connection server port
-  client: {
-    connectionTimeout: 5000, // 5 seconds
-    maxRetries: 3,
-    retryDelay: 2000, // 2 seconds
-    healthCheckInterval: 30000, // 30 seconds
-  },
-  server: {
-    startupTimeout: 10000, // 10 seconds
-    shutdownTimeout: 5000, // 5 seconds
-  },
+  defaultWsPort: 9009,
   errors: {
     noConnectedTab: 'No tab is connected',
-    serverNotAvailable: 'Browser connection server is not available',
-    connectionFailed: 'Failed to connect to browser server',
   },
 };
-
-// Browser Client - connects to browser connection server as WebSocket client
-class BrowserClient {
-  constructor(port = mcpConfig.browserServerPort) {
-    this.port = port;
-    this.ws = null;
-    this.clientId = null;
-    this.isConnected = false;
-    this.browserConnected = false;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = mcpConfig.client.maxRetries;
-    this.reconnectDelay = mcpConfig.client.retryDelay;
-  }
-
-  async connect() {
-    if (this.isConnected) {
-      return;
-    }
-
-    logger.log(`Connecting to browser server on port ${this.port}...`);
-
-    try {
-      this.ws = new WebSocket(`ws://localhost:${this.port}`);
-      
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Connection timeout'));
-        }, mcpConfig.client.connectionTimeout);
-
-        this.ws.on('open', () => {
-          clearTimeout(timeout);
-          this.isConnected = true;
-          this.reconnectAttempts = 0;
-          logger.log('Connected to browser server');
-          resolve(undefined);
-        });
-
-        this.ws.on('error', (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        });
-      });
-
-      this.setupEventHandlers();
-      
-      // Wait for handshake
-      await this.waitForHandshake();
-      
-    } catch (error) {
-      logger.error('Failed to connect to browser server:', { error: error.message });
-      throw new Error(mcpConfig.errors.connectionFailed);
-    }
-  }
-
-  setupEventHandlers() {
-    this.ws.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        this.handleMessage(message);
-      } catch (error) {
-        logger.error('Error parsing server message:', { error: error.message });
-      }
-    });
-
-    this.ws.on('close', () => {
-      logger.log('Disconnected from browser server');
-      this.isConnected = false;
-      this.browserConnected = false;
-      this.scheduleReconnect();
-    });
-
-    this.ws.on('error', (error) => {
-      logger.error('Browser client error:', { error: error.message });
-    });
-  }
-
-  handleMessage(message) {
-    switch (message.type) {
-      case 'handshake':
-        this.clientId = message.clientId;
-        this.browserConnected = message.browserConnected;
-        logger.log(`Handshake completed. Client ID: ${this.clientId}, Browser connected: ${this.browserConnected}`);
-        break;
-      
-      case 'browserDisconnected':
-        this.browserConnected = false;
-        logger.log('Browser extension disconnected');
-        break;
-      
-      default:
-        // Handle other message types if needed
-        break;
-    }
-  }
-
-  async waitForHandshake() {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Handshake timeout'));
-      }, 5000);
-
-      const checkHandshake = () => {
-        if (this.clientId !== null) {
-          clearTimeout(timeout);
-          resolve(undefined);
-        } else {
-          setTimeout(checkHandshake, 100);
-        }
-      };
-
-      checkHandshake();
-    });
-  }
-
-  async scheduleReconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      logger.error('Max reconnection attempts reached');
-      return;
-    }
-
-    this.reconnectAttempts++;
-    logger.log(`Scheduling reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${this.reconnectDelay}ms`);
-    
-    setTimeout(async () => {
-      try {
-        await this.connect();
-      } catch (error) {
-        logger.error('Reconnection failed:', { error: error.message });
-      }
-    }, this.reconnectDelay);
-  }
-
-  async sendSocketMessage(type, payload, options = { timeoutMs: 30000 }) {
-    if (!this.isConnected) {
-      throw new Error(mcpConfig.errors.serverNotAvailable);
-    }
-
-    const { sendSocketMessage } = createSocketMessageSender(this.ws);
-    try {
-      return await sendSocketMessage(type, payload, options);
-    } catch (error) {
-      if (error instanceof Error && error.message === mcpConfig.errors.noConnectedTab) {
-        throw new Error(noConnectionMessage);
-      }
-      throw error;
-    }
-  }
-
-  async close() {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
-    this.isConnected = false;
-    this.clientId = null;
-  }
-
-  hasConnection() {
-    return this.isConnected && this.browserConnected;
-  }
-
-  getStatus() {
-    return {
-      isConnected: this.isConnected,
-      browserConnected: this.browserConnected,
-      clientId: this.clientId,
-      reconnectAttempts: this.reconnectAttempts
-    };
-  }
-}
 
 // src/context.ts
 var noConnectionMessage = `No connection to browser extension. In order to proceed, you must first connect a tab by clicking the Browser MCP extension icon in the browser toolbar and clicking the 'Connect' button.`;
 var Context = class {
-  constructor() {
-    this.browserClient = new BrowserClient();
-  }
-
+  _ws;
   get ws() {
-    // Legacy compatibility - return the underlying WebSocket if available
-    return this.browserClient.ws;
+    if (!this._ws) {
+      throw new Error(noConnectionMessage);
+    }
+    return this._ws;
   }
-
   set ws(ws) {
-    // Legacy compatibility - not used in new architecture
-    logger.log('Warning: Direct WebSocket assignment is deprecated in multi-instance mode');
+    this._ws = ws;
   }
-
   hasWs() {
-    return this.browserClient.hasConnection();
+    return !!this._ws;
   }
-
-  async connect() {
-    await this.browserClient.connect();
+  async sendSocketMessage(type2, payload, options = { timeoutMs: 3e4 }) {
+    const { sendSocketMessage } = createSocketMessageSender(this.ws);
+    try {
+      return await sendSocketMessage(type2, payload, options);
+    } catch (e) {
+      if (e instanceof Error && e.message === mcpConfig.errors.noConnectedTab) {
+        throw new Error(noConnectionMessage);
+      }
+      throw e;
+    }
   }
-
-  async sendSocketMessage(type, payload, options = { timeoutMs: 30000 }) {
-    return await this.browserClient.sendSocketMessage(type, payload, options);
-  }
-
   async close() {
-    await this.browserClient.close();
-  }
-
-  getStatus() {
-    return this.browserClient.getStatus();
+    if (!this._ws) {
+      return;
+    }
+    await this._ws.close();
   }
 };
 
 // src/ws.ts
 import { WebSocketServer } from 'ws';
 
-// Browser Connection Server - handles multiple MCP clients and single browser connection
-class BrowserConnectionServer {
-  constructor(port = mcpConfig.browserServerPort) {
-    this.port = port;
-    this.wss = null;
-    this.browserConnection = null;
-    this.mcpClients = new Map(); // clientId -> websocket
-    this.pendingRequests = new Map(); // requestId -> { clientId, resolve, reject }
-    this.isRunning = false;
-  }
-
-  async start() {
-    if (this.isRunning) {
-      logger.log('Browser connection server already running');
-      return;
-    }
-
-    logger.log(`Starting browser connection server on port ${this.port}...`);
-    
-    // Clean up any existing processes on the port
-    killProcessOnPort(this.port);
-    await wait(500);
-
-    // Wait for port to be available
-    let attempts = 0;
-    const maxAttempts = 50;
-    while (await isPortInUse(this.port)) {
-      attempts++;
-      if (attempts > maxAttempts) {
-        throw new Error(`Port ${this.port} is still in use after ${maxAttempts * 100}ms`);
-      }
-      await wait(100);
-    }
-
-    this.wss = new WebSocketServer({ port: this.port });
-    this.setupEventHandlers();
-    this.isRunning = true;
-    
-    logger.log(`Browser connection server started successfully on port ${this.port}`);
-  }
-
-  setupEventHandlers() {
-    this.wss.on('connection', (ws, req) => {
-      const userAgent = req.headers['user-agent'] || '';
-      const isBrowserExtension = userAgent.includes('Mozilla') || userAgent.includes('Chrome');
-      
-      if (isBrowserExtension) {
-        this.handleBrowserConnection(ws);
-      } else {
-        this.handleMcpClientConnection(ws);
-      }
-    });
-
-    this.wss.on('error', (error) => {
-      logger.error('Browser connection server error:', { error: error.message });
-    });
-  }
-
-  handleBrowserConnection(ws) {
-    logger.log('Browser extension connected');
-    
-    // Close existing browser connection if any
-    if (this.browserConnection) {
-      this.browserConnection.close();
-    }
-    
-    this.browserConnection = ws;
-
-    ws.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        this.handleBrowserMessage(message);
-      } catch (error) {
-        logger.error('Error parsing browser message:', { error: error.message });
-      }
-    });
-
-    ws.on('close', () => {
-      logger.log('Browser extension disconnected');
-      this.browserConnection = null;
-      // Notify all MCP clients that browser is disconnected
-      this.notifyMcpClientsOfBrowserDisconnection();
-    });
-
-    ws.on('error', (error) => {
-      logger.error('Browser connection error:', { error: error.message });
-    });
-  }
-
-  handleMcpClientConnection(ws) {
-    const clientId = generateId();
-    logger.log(`MCP client connected: ${clientId}`);
-    
-    this.mcpClients.set(clientId, ws);
-
-    ws.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        this.handleMcpClientMessage(clientId, message);
-      } catch (error) {
-        logger.error('Error parsing MCP client message:', { error: error.message });
-      }
-    });
-
-    ws.on('close', () => {
-      logger.log(`MCP client disconnected: ${clientId}`);
-      this.mcpClients.delete(clientId);
-      // Clean up any pending requests for this client
-      this.cleanupClientRequests(clientId);
-    });
-
-    ws.on('error', (error) => {
-      logger.error(`MCP client error (${clientId}):`, { error: error.message });
-    });
-
-    // Send handshake response
-    ws.send(JSON.stringify({
-      type: 'handshake',
-      clientId,
-      browserConnected: !!this.browserConnection
-    }));
-  }
-
-  handleMcpClientMessage(clientId, message) {
-    if (!this.browserConnection) {
-      // Send error response back to MCP client
-      const client = this.mcpClients.get(clientId);
-      if (client) {
-        client.send(JSON.stringify({
-          id: message.id,
-          type: MESSAGE_RESPONSE_TYPE,
-          payload: {
-            requestId: message.id,
-            error: mcpConfig.errors.noConnectedTab
-          }
-        }));
-      }
-      return;
-    }
-
-    // Add client ID to message for routing responses back
-    const forwardedMessage = {
-      ...message,
-      _mcpClientId: clientId
-    };
-
-    // Store pending request for response routing
-    if (message.id) {
-      this.pendingRequests.set(message.id, { clientId });
-    }
-
-    // Forward message to browser
-    this.browserConnection.send(JSON.stringify(forwardedMessage));
-  }
-
-  handleBrowserMessage(message) {
-    if (message.type === MESSAGE_RESPONSE_TYPE && message.payload?.requestId) {
-      const requestId = message.payload.requestId;
-      const pendingRequest = this.pendingRequests.get(requestId);
-      
-      if (pendingRequest) {
-        const { clientId } = pendingRequest;
-        const client = this.mcpClients.get(clientId);
-        
-        if (client) {
-          // Remove client ID before sending back to MCP client
-          const responseMessage = { ...message };
-          delete responseMessage._mcpClientId;
-          client.send(JSON.stringify(responseMessage));
-        }
-        
-        this.pendingRequests.delete(requestId);
-      }
-    }
-  }
-
-  notifyMcpClientsOfBrowserDisconnection() {
-    for (const [clientId, client] of this.mcpClients) {
-      client.send(JSON.stringify({
-        type: 'browserDisconnected',
-        timestamp: new Date().toISOString()
-      }));
-    }
-  }
-
-  cleanupClientRequests(clientId) {
-    for (const [requestId, request] of this.pendingRequests) {
-      if (request.clientId === clientId) {
-        this.pendingRequests.delete(requestId);
-      }
-    }
-  }
-
-  async stop() {
-    if (!this.isRunning) {
-      return;
-    }
-
-    logger.log('Stopping browser connection server...');
-    
-    // Close all client connections
-    for (const client of this.mcpClients.values()) {
-      client.close();
-    }
-    this.mcpClients.clear();
-
-    if (this.browserConnection) {
-      this.browserConnection.close();
-      this.browserConnection = null;
-    }
-
-    if (this.wss) {
-      await new Promise((resolve) => {
-        this.wss.close(resolve);
-      });
-      this.wss = null;
-    }
-
-    this.pendingRequests.clear();
-    this.isRunning = false;
-    
-    logger.log('Browser connection server stopped');
-  }
-
-  getStatus() {
-    return {
-      isRunning: this.isRunning,
-      port: this.port,
-      browserConnected: !!this.browserConnection,
-      mcpClientCount: this.mcpClients.size,
-      pendingRequestCount: this.pendingRequests.size
-    };
-  }
-}
-
 // ../../packages/utils/src/index.ts
 async function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(() => resolve(undefined), ms);
   });
-}
-
-// Server Manager - handles browser connection server lifecycle
-class ServerManager {
-  constructor() {
-    this.browserServer = null;
-    this.serverProcess = null;
-    this.isManaging = false;
-  }
-
-  async checkServerRunning(port = mcpConfig.browserServerPort) {
-    return await checkServerHealth(port);
-  }
-
-  async startServer() {
-    if (this.browserServer && this.browserServer.isRunning) {
-      logger.log('Browser server already running');
-      return true;
-    }
-
-    try {
-      logger.log('Starting browser connection server...');
-      this.browserServer = new BrowserConnectionServer();
-      await this.browserServer.start();
-      this.isManaging = true;
-      return true;
-    } catch (error) {
-      logger.error('Failed to start browser server:', { error: error.message });
-      return false;
-    }
-  }
-
-  async stopServer() {
-    if (this.browserServer) {
-      await this.browserServer.stop();
-      this.browserServer = null;
-    }
-    this.isManaging = false;
-  }
-
-  async restartServer() {
-    logger.log('Restarting browser connection server...');
-    await this.stopServer();
-    
-    // Kill any processes that might be using the port
-    killProcessOnPort(mcpConfig.browserServerPort);
-    await wait(1000);
-    
-    return await this.startServer();
-  }
-
-  async ensureServerRunning() {
-    // First check if server is already running externally
-    if (await this.checkServerRunning()) {
-      logger.log('Browser server is already running (external)');
-      return true;
-    }
-
-    // If we're managing a server but it's not responding, restart it
-    if (this.isManaging) {
-      logger.log('Managed server not responding, restarting...');
-      return await this.restartServer();
-    }
-
-    // Start a new server
-    return await this.startServer();
-  }
-
-  async handleServerFailure() {
-    logger.log('Handling server failure...');
-    
-    // Check if there's still an external server running
-    if (await this.checkServerRunning()) {
-      logger.log('External server detected, not restarting managed server');
-      return true;
-    }
-
-    // Kill any zombie processes and restart
-    killProcessOnPort(mcpConfig.browserServerPort);
-    await wait(2000);
-    
-    return await this.startServer();
-  }
-
-  getStatus() {
-    return {
-      isManaging: this.isManaging,
-      serverRunning: this.browserServer?.isRunning || false,
-      serverStatus: this.browserServer?.getStatus() || null
-    };
-  }
-
-  async cleanup() {
-    await this.stopServer();
-  }
 }
 
 // Logging utilities
@@ -872,42 +356,6 @@ function killProcessOnPort(port) {
   }
 }
 
-// Server health check utilities
-async function checkServerHealth(port) {
-  try {
-    const ws = new WebSocket(`ws://localhost:${port}`);
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        ws.close();
-        resolve(false);
-      }, 2000);
-
-      ws.on('open', () => {
-        clearTimeout(timeout);
-        ws.close();
-        resolve(true);
-      });
-
-      ws.on('error', () => {
-        clearTimeout(timeout);
-        resolve(false);
-      });
-    });
-  } catch (error) {
-    return false;
-  }
-}
-
-async function waitForServerReady(port, maxAttempts = 30) {
-  for (let i = 0; i < maxAttempts; i++) {
-    if (await checkServerHealth(port)) {
-      return true;
-    }
-    await wait(1000);
-  }
-  return false;
-}
-
 // src/ws.ts
 async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
   logger.log(`Initializing WebSocket server on port ${port}...`);
@@ -944,8 +392,6 @@ async function createWebSocketServer(port = mcpConfig.defaultWsPort) {
 async function createServerWithTools(options) {
   const { name, version, tools, resources: resources2 } = options;
   const context = new Context();
-  const serverManager = new ServerManager();
-  
   const server = new Server(
     { name, version },
     {
@@ -955,37 +401,19 @@ async function createServerWithTools(options) {
       },
     }
   );
-
-  // Ensure browser connection server is running
-  logger.log('Ensuring browser connection server is available...');
-  const serverStarted = await serverManager.ensureServerRunning();
-  if (!serverStarted) {
-    throw new Error('Failed to start browser connection server');
-  }
-
-  // Connect to browser server
-  try {
-    await context.connect();
-    logger.log('Successfully connected to browser server');
-  } catch (error) {
-    logger.error('Failed to connect to browser server:', { error: error.message });
-    // Try to handle server failure and retry
-    const recovered = await serverManager.handleServerFailure();
-    if (recovered) {
-      await context.connect();
-    } else {
-      throw new Error('Failed to establish connection to browser server');
+  const wss = await createWebSocketServer();
+  wss.on('connection', (websocket) => {
+    if (context.hasWs()) {
+      context.ws.close();
     }
-  }
-
+    context.ws = websocket;
+  });
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return { tools: tools.map((tool) => tool.schema) };
   });
-  
   server.setRequestHandler(ListResourcesRequestSchema, async () => {
     return { resources: resources2.map((resource) => resource.schema) };
   });
-  
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tool = tools.find(
       (tool2) => tool2.schema.name === request.params.name
@@ -1002,32 +430,12 @@ async function createServerWithTools(options) {
       const result = await tool.handle(context, request.params.arguments);
       return result;
     } catch (error) {
-      // Check if error is due to server connection issues
-      if (error instanceof Error && 
-          (error.message.includes(mcpConfig.errors.serverNotAvailable) ||
-           error.message.includes(mcpConfig.errors.connectionFailed))) {
-        
-        logger.log('Detected server connection issue, attempting recovery...');
-        const recovered = await serverManager.handleServerFailure();
-        if (recovered) {
-          try {
-            await context.connect();
-            // Retry the tool execution
-            const retryResult = await tool.handle(context, request.params.arguments);
-            return retryResult;
-          } catch (retryError) {
-            logger.error('Tool execution failed after recovery:', { error: retryError.message });
-          }
-        }
-      }
-      
       return {
         content: [{ type: 'text', text: String(error) }],
         isError: true,
       };
     }
   });
-  
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const resource = resources2.find(
       (resource2) => resource2.schema.uri === request.params.uri
@@ -1038,14 +446,12 @@ async function createServerWithTools(options) {
     const contents = await resource.read(context, request.params.uri);
     return { contents };
   });
-  
   const originalClose = server.close.bind(server);
   server.close = async () => {
     await originalClose();
+    await wss.close();
     await context.close();
-    await serverManager.cleanup();
   };
-  
   return server;
 }
 
@@ -1791,7 +1197,6 @@ class ServerStateMachine {
 
           case 'CREATING_SERVER':
             try {
-              // In the new architecture, createServer handles browser server management
               this.server = await createServer();
               this.transition('CONNECTING');
             } catch (error) {
@@ -1829,7 +1234,7 @@ class ServerStateMachine {
             break;
 
           case 'CONNECTED':
-            logger.log('MCP Server connected successfully. Running...');
+            logger.log('Server connected successfully. Running...');
             // In connected state, we wait for external events (handled by exit watchdog)
             // Use a more efficient event-driven approach instead of polling
             await new Promise((resolve) => {
