@@ -38,6 +38,7 @@ import { mcpConfig } from './config/mcp.config.js';
 import { startDiscoveryServer } from './discovery/index.js';
 import { fork } from 'child_process';
 import { isPortInUse, killProcessOnPort, findAvailablePort } from './utils/port.js';
+import { startProxy } from './proxy/index.js';
 
 // Package metadata loading for version information
 import { readFileSync } from 'fs';
@@ -198,20 +199,22 @@ const resources = [];
  * @async
  * @function createServer
  * @param {number} port - The port to run the WebSocket server on.
+ * @param {string} serverId - The unique server ID.
  * @returns {Promise<Server>} Configured MCP server instance
  * 
  * @example
  * // Used by state machine to create server instances
- * const server = await createServer();
+ * const server = await createServer(9010, 'server-123');
  * await server.connect(transport);
  */
-async function createServer(port) {
+async function createServer(port, serverId) {
   return createServerWithTools({
     name: appConfig.name,
     version: packageJson.version,
     tools: snapshotTools,
     resources,
     port: port,
+    serverId: serverId,
   });
 }
 
@@ -326,6 +329,47 @@ async function runDiscoveryServerOnce() {
   console.log(`Discovery server is now active on port ${DISCOVERY_SERVER_PORT}`);
 }
 
+async function runProxyServerOnce() {
+  const PROXY_PORT = 9009;
+  // Check if proxy server is already running
+  if (await isPortInUse(PROXY_PORT)) {
+    console.log(`Proxy server already running on port ${PROXY_PORT}`);
+    return;
+  }
+
+  console.log('Proxy server not found, starting a new one...');
+
+  // Start the proxy server as a child process
+  const proxyProcess = fork('./src/proxy/index.js', [], {
+    silent: true, // Keep child process output separate
+  });
+
+  // Optional: You can listen to process messages or errors if needed
+  proxyProcess.on('error', (err) => {
+    console.error('Proxy server child process error:', err);
+  });
+
+  proxyProcess.on('exit', (code, signal) => {
+    console.log(
+      `Proxy server child process exited with code ${code} and signal ${signal}`
+    );
+  });
+
+  // Poll until the proxy server port is in use
+  let attempts = 0;
+  const maxAttempts = 20; // Try for up to 2 seconds (20 * 100ms)
+  while (attempts < maxAttempts && !(await isPortInUse(PROXY_PORT))) {
+    attempts++;
+    await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms before next check
+  }
+
+  if (!(await isPortInUse(PROXY_PORT))) {
+    throw new Error(`Proxy server did not start on port ${PROXY_PORT} within the expected time.`);
+  }
+
+  console.log(`Proxy server is now active on port ${PROXY_PORT}`);
+}
+
 // ============================================================================
 // COMMAND LINE INTERFACE
 // Setup using Commander.js for version display and execution
@@ -340,6 +384,17 @@ program
   .version('Version ' + packageJson.version)
   .name(packageJson.name)
   .description(appConfig.description);
+
+/**
+ * Command to start just the proxy server.
+ */
+program
+  .command('proxy')
+  .description('Start the WebSocket proxy server on port 9009')
+  .action(async () => {
+    await runDiscoveryServerOnce(); // Ensure discovery server is running
+    await startProxy(); // Start the proxy server directly
+  });
 
 /**
  * Command to list all active Browser MCP servers registered with the discovery service.
@@ -376,14 +431,17 @@ program
     // Ensure discovery server is running (or start it)
     await runDiscoveryServerOnce();
 
+    // Ensure proxy server is running (or start it)
+    await runProxyServerOnce();
+
     // Find an available port for this Browser MCP server
-    const serverPort = await findAvailablePort(mcpConfig.defaultWsPort);
+    const serverPort = await findAvailablePort(mcpConfig.defaultWsPort + 1); // Start from 9010, since 9009 is for proxy
     currentServerPort = serverPort; // Store for use in heartbeat function
     console.log(`Browser MCP server will use port: ${serverPort}`);
 
     // Create state machine with server factory function
     const stateMachine = new ServerStateMachine({
-      createServer: () => createServer(serverPort),
+      createServer: () => createServer(serverPort, serverId),
     });
     
     // Register with discovery server on startup

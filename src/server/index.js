@@ -41,6 +41,7 @@ import { createWebSocketServer } from '../ws/index.js';
  * @param {Array<Object>} options.tools - Array of tool objects with schema and handle methods
  * @param {Array<Object>} options.resources - Array of resource objects with schema and read methods
  * @param {string} options.port - WebSocket server port
+ * @param {string} options.serverId - Server ID for context management
  * @returns {Promise<Server>} Configured MCP server ready to handle requests
  * 
  * @example
@@ -50,7 +51,8 @@ import { createWebSocketServer } from '../ws/index.js';
  *   version: '1.0.0',
  *   tools: [navigateTool, clickTool, typeTool],
  *   resources: [pageResource, historyResource],
- *   port: '8080'
+ *   port: '8080',
+ *   serverId: 'browser-mcp'
  * });
  * 
  * @example
@@ -60,10 +62,10 @@ import { createWebSocketServer } from '../ws/index.js';
  * // Server is now ready to handle MCP requests
  */
 export async function createServerWithTools(options) {
-  const { name, version, tools, resources, port } = options;
+  const { name, version, tools, resources, port, serverId } = options;
   
-  // Create context for managing browser connections
-  const context = new Context();
+  // Create context for managing browser communication through proxy
+  const context = new Context(serverId);
   
   // Initialize MCP server with capabilities
   const server = new Server(
@@ -78,21 +80,8 @@ export async function createServerWithTools(options) {
     }
   );
   
-  // Create WebSocket server for browser extension communication
-  const wss = await createWebSocketServer(port);
-  
-  /**
-   * Handle new WebSocket connections from browser extensions.
-   * Only one connection is active at a time - new connections replace old ones.
-   */
-  wss.on('connection', (websocket) => {
-    // Close existing connection if present
-    if (context.hasWs()) {
-      context.ws.close();
-    }
-    // Set new connection as active
-    context.ws = websocket;
-  });
+  // Note: We no longer create a WebSocket server here since all communication
+  // goes through the proxy server
   
   /**
    * Handler for ListTools requests.
@@ -169,15 +158,11 @@ export async function createServerWithTools(options) {
   
   /**
    * Enhanced server close method with comprehensive cleanup.
-   * Ensures all resources are properly cleaned up on server shutdown:
-   * - Closes MCP server connection
-   * - Shuts down WebSocket server
-   * - Closes browser extension connections
+   * Ensures all resources are properly cleaned up on server shutdown.
    */
   const originalClose = server.close.bind(server);
   server.close = async () => {
     await originalClose();
-    await wss.close();
     await context.close();
   };
   
