@@ -35,6 +35,7 @@ import {
   selectOption,
 } from './tools/snapshot.js';
 import { ProxyServer, isProxyRunning, getProxyConfig } from './proxy.js';
+import { logger } from './utils/logger.js';
 
 // Package metadata loading for version information
 import { readFileSync } from 'fs';
@@ -212,41 +213,41 @@ async function createServer() {
  * @returns {Promise<void>} Resolves when server is started
  */
 async function startBrowserMcp() {
-  console.log('Starting Browser MCP server...');
+  logger.log('Starting Browser MCP server...');
   
   // Check if proxy is already running
   const proxyRunning = await isProxyRunning();
   
   if (proxyRunning) {
-    console.log('✅ Existing healthy proxy server detected');
+    logger.log('✅ Existing healthy proxy server detected');
     const config = getProxyConfig();
-    console.log(`📡 Using proxy server:`);
-    console.log(`   HTTP API: ${config.endpoints.health}`);
-    console.log(`   Tool endpoint: ${config.endpoints.tool}`);
-    console.log(`   Browser WebSocket: ws://localhost:${config.MCP_PORT}`);
-    console.log('🚀 Browser MCP is ready to use existing proxy');
-    console.log('💡 Press Ctrl+C to exit');
+    logger.log(`📡 Using proxy server:`);
+    logger.log(`   HTTP API: ${config.endpoints.health}`);
+    logger.log(`   Tool endpoint: ${config.endpoints.tool}`);
+    logger.log(`   Browser WebSocket: ws://localhost:${config.MCP_PORT}`);
+    logger.log('🚀 Browser MCP is ready to use existing proxy');
+    logger.log('💡 Press Ctrl+C to exit');
     
     // Keep process running and monitor proxy health
     const keepAlive = setInterval(async () => {
       // Periodic health check to ensure proxy is still running
       const stillRunning = await isProxyRunning();
       if (!stillRunning) {
-        console.log('⚠️  Proxy server is no longer available');
-        console.log('🔄 You may want to restart to create a new proxy server');
+        logger.log('⚠️  Proxy server is no longer available');
+        logger.log('🔄 You may want to restart to create a new proxy server');
         // Could automatically restart here, but for now just warn
       }
     }, 30000); // Check every 30 seconds
     
     // Handle graceful shutdown
     process.on('SIGINT', () => {
-      console.log('\n👋 Browser MCP client shutting down...');
+      logger.log('\n👋 Browser MCP client shutting down...');
       clearInterval(keepAlive);
       process.exit(0);
     });
     
     process.on('SIGTERM', () => {
-      console.log('\n👋 Browser MCP client shutting down...');
+      logger.log('\n👋 Browser MCP client shutting down...');
       clearInterval(keepAlive);
       process.exit(0);
     });
@@ -255,7 +256,7 @@ async function startBrowserMcp() {
     return new Promise(() => {}); // Never resolves, keeps process alive
   }
   
-  console.log('🔍 No existing proxy detected, starting new proxy server...');
+  logger.log('🔍 No existing proxy detected, starting new proxy server...');
   
   // Start new proxy server with full MCP integration
   const proxy = new ProxyServer({
@@ -270,15 +271,15 @@ async function startBrowserMcp() {
   const result = await proxy.start();
   
   if (result.status === 'started') {
-    console.log('✅ Proxy server started successfully');
-    console.log(`📡 Services available:`);
-    console.log(`   HTTP API: http://localhost:${result.ports.http}`);
-    console.log(`   Browser WebSocket: ws://localhost:${result.ports.mcp}`);
-    console.log(`   Tools: ${result.tools} available`);
-    console.log(`   Resources: ${result.resources} available`);
-    console.log('🚀 Browser MCP proxy server is ready');
+    logger.log('✅ Proxy server started successfully');
+    logger.log(`📡 Services available:`);
+    logger.log(`   HTTP API: http://localhost:${result.ports.http}`);
+    logger.log(`   Browser WebSocket: ws://localhost:${result.ports.mcp}`);
+    logger.log(`   Tools: ${result.tools} available`);
+    logger.log(`   Resources: ${result.resources} available`);
+    logger.log('🚀 Browser MCP proxy server is ready');
   } else {
-    console.log('ℹ️  Using existing proxy server');
+    logger.log('ℹ️  Using existing proxy server');
   }
 }
 
@@ -308,7 +309,7 @@ program
     try {
       await startBrowserMcp();
     } catch (error) {
-      console.error('❌ Failed to start Browser MCP server:', error.message);
+      logger.error('❌ Failed to start Browser MCP server:', error.message);
       process.exit(1);
     }
   });

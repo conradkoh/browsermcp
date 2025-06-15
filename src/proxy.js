@@ -23,6 +23,7 @@
 import { detectExistingProxy, PROXY_CONFIG } from './proxy/detection.js';
 import { createHttpServer, startHttpServer } from './proxy/server.js';
 import { createMcpHandler, createToolCallHandler } from './proxy/mcp-handler.js';
+import { logger } from './utils/logger.js';
 
 /**
  * Proxy Server class that manages the complete proxy lifecycle.
@@ -49,7 +50,7 @@ export class ProxyServer {
    * @example
    * const proxy = new ProxyServer({ tools, resources });
    * const result = await proxy.start();
-   * console.log(`Proxy server status: ${result.status}`);
+   * logger.log(`Proxy server status: ${result.status}`);
    */
   async start() {
     try {
@@ -69,7 +70,7 @@ export class ProxyServer {
       }
       
       if (detection.exists && !detection.healthy) {
-        console.warn('Existing proxy found but unhealthy, starting new proxy server');
+        logger.warn('Existing proxy found but unhealthy, starting new proxy server');
       }
       
       // Start new proxy server
@@ -125,11 +126,11 @@ export class ProxyServer {
       // Setup graceful shutdown handlers
       this.setupShutdownHandlers();
       
-      console.log(`Proxy server started successfully:`);
-      console.log(`  HTTP API: http://localhost:${PROXY_CONFIG.HTTP_PORT}`);
-      console.log(`  MCP Port: ${PROXY_CONFIG.MCP_PORT}`);
-      console.log(`  Tools: ${this.tools.length}`);
-      console.log(`  Resources: ${this.resources.length}`);
+      logger.log(`Proxy server started successfully:`);
+      logger.log(`  HTTP API: http://localhost:${PROXY_CONFIG.HTTP_PORT}`);
+      logger.log(`  MCP Port: ${PROXY_CONFIG.MCP_PORT}`);
+      logger.log(`  Tools: ${this.tools.length}`);
+      logger.log(`  Resources: ${this.resources.length}`);
       
     } catch (error) {
       await this.cleanup();
@@ -148,7 +149,7 @@ export class ProxyServer {
     
     signals.forEach(signal => {
       const handler = async () => {
-        console.log(`\nReceived ${signal}, shutting down proxy server gracefully...`);
+        logger.log(`\nReceived ${signal}, shutting down proxy server gracefully...`);
         await this.stop();
         process.exit(0);
       };
@@ -159,14 +160,14 @@ export class ProxyServer {
     
     // Handle uncaught exceptions
     process.on('uncaughtException', async (error) => {
-      console.error('Uncaught exception:', error);
+      logger.error('Uncaught exception:', error);
       await this.stop();
       process.exit(1);
     });
     
     // Handle unhandled promise rejections
     process.on('unhandledRejection', async (reason, promise) => {
-      console.error('Unhandled rejection at:', promise, 'reason:', reason);
+      logger.error('Unhandled rejection at:', promise, 'reason:', reason);
       await this.stop();
       process.exit(1);
     });
@@ -184,14 +185,14 @@ export class ProxyServer {
       return;
     }
     
-    console.log('Stopping proxy server...');
+    logger.log('Stopping proxy server...');
     
     try {
       await this.cleanup();
       this.isRunning = false;
-      console.log('Proxy server stopped successfully');
+      logger.log('Proxy server stopped successfully');
     } catch (error) {
-      console.error('Error during proxy server shutdown:', error);
+      logger.error('Error during proxy server shutdown:', error);
     }
   }
   
@@ -210,7 +211,7 @@ export class ProxyServer {
     if (this.httpServer) {
       cleanupPromises.push(
         this.httpServer.close().catch(error => 
-          console.error('Error closing HTTP server:', error)
+          logger.error('Error closing HTTP server:', error)
         )
       );
       this.httpServer = null;
@@ -220,7 +221,7 @@ export class ProxyServer {
     if (this.mcpHandler) {
       cleanupPromises.push(
         this.mcpHandler.shutdown().catch(error => 
-          console.error('Error shutting down MCP handler:', error)
+          logger.error('Error shutting down MCP handler:', error)
         )
       );
       this.mcpHandler = null;
@@ -268,11 +269,13 @@ export class ProxyServer {
  * @returns {Promise<ProxyServer>} Started proxy server instance
  * 
  * @example
- * const proxy = await createProxyServer({
+ * const proxy = new ProxyServer({
  *   tools: [navigateTool, clickTool],
  *   resources: [pageResource],
  *   serverConfig: { name: 'My Proxy', version: '1.0.0' }
  * });
+ * const result = await proxy.start();
+ * logger.log(`Proxy server status: ${result.status}`);
  */
 export async function createProxyServer(options) {
   const proxy = new ProxyServer(options);
