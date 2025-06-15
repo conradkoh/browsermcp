@@ -1,95 +1,127 @@
 /**
  * Application Context Management
  * 
- * This file provides the Context class which manages communication with the browser
- * through the proxy server. Instead of requiring direct WebSocket connections,
- * all Browser MCP servers now route messages through the proxy via HTTP API.
+ * This file provides the Context class which manages the WebSocket connection
+ * to the browser extension and provides a unified interface for sending messages.
+ * The context serves as the communication layer between the MCP server and
+ * the browser extension.
  * 
  * Key responsibilities:
- * - Providing a unified interface for sending browser commands
- * - Routing messages through the proxy server
- * - Always reporting as "connected" for seamless operation
- * - Handling communication errors gracefully
+ * - Managing WebSocket connection lifecycle
+ * - Providing a safe interface for message sending
+ * - Handling connection state and error conditions
+ * - Translating MCP errors to user-friendly messages
  * 
- * @fileoverview Application context and proxy communication management
+ * @fileoverview Application context and WebSocket connection management
  */
 
 import { mcpConfig } from './config/mcp.config.js';
-import fetch from 'node-fetch';
+import { createSocketMessageSender } from './ws/sender.js';
 
 /**
- * Context class that manages communication with the browser through the proxy server.
- * This class provides a unified interface for browser communication without requiring
- * direct WebSocket connections to individual Browser MCP servers.
+ * User-friendly error message displayed when no browser extension connection exists.
+ * This message provides clear instructions on how to establish a connection.
  * 
- * All Browser MCP servers are now considered "always connected" and route their
- * browser commands through the centralized proxy server.
+ * @type {string}
+ * @constant
+ */
+const noConnectionMessage = `No connection to browser extension. In order to proceed, you must first connect a tab by clicking the Browser MCP extension icon in the browser toolbar and clicking the 'Connect' button.`;
+
+/**
+ * Context class that manages the WebSocket connection to the browser extension.
+ * This class provides a safe, managed interface for communicating with the browser
+ * and handles connection state, error conditions, and message routing.
+ * 
+ * The Context class implements a singleton-like pattern where only one WebSocket
+ * connection is active at a time, automatically replacing old connections when
+ * new ones are established.
  * 
  * @class Context
  * 
  * @example
  * const context = new Context();
+ * context.ws = websocketConnection;
  * const result = await context.sendSocketMessage('browser_click', { element: 'button' });
  */
 export class Context {
   /**
-   * Proxy server URL for routing browser commands
-   * @type {string}
-   * @private
-   */
-  _proxyUrl = 'http://localhost:9009';
-
-  /**
-   * Server ID for identifying this Browser MCP server instance
-   * @type {string}
-   * @private
-   */
-  _serverId;
-
-  /**
-   * Creates a new Context instance.
-   * @param {string} serverId - Unique identifier for this Browser MCP server
-   */
-  constructor(serverId) {
-    this._serverId = serverId;
-  }
-
-  /**
-   * Always returns true since all servers are considered connected through the proxy.
-   * This ensures that all Browser MCP servers can process commands regardless of
-   * direct browser connections.
+   * Private WebSocket connection instance.
+   * Access should be through the ws getter/setter for proper error handling.
    * 
-   * @type {boolean}
-   * @readonly
+   * @type {WebSocket|null}
+   * @private
+   */
+  _ws;
+
+  /**
+   * Gets the current WebSocket connection.
+   * Throws an error if no connection is available, providing user-friendly
+   * guidance on how to establish a connection.
+   * 
+   * @type {WebSocket}
+   * @throws {Error} Throws error with connection instructions if no WebSocket is available
+   * 
+   * @example
+   * try {
+   *   const ws = context.ws;
+   *   // Use WebSocket connection
+   * } catch (error) {
+   *   console.error(error.message); // User-friendly connection instructions
+   * }
    */
   get ws() {
-    // Always return a truthy value to indicate "connected" state
-    return { connected: true };
+    if (!this._ws) {
+      throw new Error(noConnectionMessage);
+    }
+    return this._ws;
   }
 
   /**
-   * Setter for WebSocket compatibility (no-op since we use proxy routing).
-   * @param {*} ws - Ignored parameter for compatibility
+   * Sets the WebSocket connection.
+   * This automatically replaces any existing connection, allowing for
+   * seamless connection updates when new browser tabs connect.
+   * 
+   * @param {WebSocket} ws - The new WebSocket connection to use
+   * 
+   * @example
+   * // Set initial connection
+   * context.ws = newWebSocketConnection;
+   * 
+   * @example
+   * // Replace existing connection
+   * if (context.hasWs()) {
+   *   context.ws.close(); // Optional: explicitly close old connection
+   * }
+   * context.ws = newWebSocketConnection;
    */
   set ws(ws) {
-    // No-op: We don't use direct WebSocket connections anymore
+    this._ws = ws;
   }
 
   /**
-   * Always returns true since all servers route through the proxy.
-   * This ensures consistent behavior across all Browser MCP server instances.
+   * Checks if a WebSocket connection is currently available.
+   * This is a safe way to test for connection availability without
+   * triggering the error that the ws getter would throw.
    * 
    * @method hasWs
-   * @returns {boolean} Always returns true
+   * @returns {boolean} True if a WebSocket connection exists, false otherwise
+   * 
+   * @example
+   * if (context.hasWs()) {
+   *   // Safe to use context.ws or sendSocketMessage
+   *   const result = await context.sendSocketMessage('getUrl');
+   * } else {
+   *   console.log('No browser connection available');
+   * }
    */
   hasWs() {
-    return true;
+    return !!this._ws;
   }
 
   /**
-   * Sends a browser command through the proxy server.
-   * This method routes the command to the proxy, which handles browser communication
-   * and returns the result back to this Browser MCP server.
+   * Sends a message over the WebSocket connection and waits for a response.
+   * This method provides a high-level interface for browser communication
+   * with automatic error translation and timeout handling.
    * 
    * @async
    * @method sendSocketMessage
@@ -98,62 +130,69 @@ export class Context {
    * @param {Object} [options={ timeoutMs: 30000 }] - Configuration options
    * @param {number} [options.timeoutMs=30000] - Timeout in milliseconds
    * @returns {Promise<*>} Promise that resolves with the response data
-   * @throws {Error} Throws error for communication issues
+   * @throws {Error} Throws user-friendly error messages for connection and communication issues
    * 
    * @example
    * // Get current page URL
    * const url = await context.sendSocketMessage('getUrl', undefined);
    * 
    * @example
-   * // Click an element
+   * // Click an element with custom timeout
    * await context.sendSocketMessage('browser_click', 
-   *   { element: 'Login button', ref: 'button[type="submit"]' }
+   *   { element: 'Login button', ref: 'button[type="submit"]' },
+   *   { timeoutMs: 10000 }
    * );
+   * 
+   * @example
+   * // Handle communication errors
+   * try {
+   *   const result = await context.sendSocketMessage('browser_action', data);
+   * } catch (error) {
+   *   if (error.message.includes('No connection')) {
+   *     // Guide user to connect browser extension
+   *   } else {
+   *     // Handle other communication errors
+   *   }
+   * }
    */
   async sendSocketMessage(type, payload, options = { timeoutMs: 30000 }) {
+    const { sendSocketMessage } = createSocketMessageSender(this.ws);
     try {
-      const response = await fetch(`${this._proxyUrl}/api/browser-command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serverId: this._serverId,
-          type,
-          payload,
-          options
-        }),
-        timeout: options.timeoutMs
-      });
-
-      if (!response.ok) {
-        throw new Error(`Proxy server error: ${response.statusText}`);
+      return await sendSocketMessage(type, payload, options);
+    } catch (e) {
+      // Translate internal MCP errors to user-friendly messages
+      if (e instanceof Error && e.message === mcpConfig.errors.noConnectedTab) {
+        throw new Error(noConnectionMessage);
       }
-
-      const result = await response.json();
-      
-      if (result.error) {
-        throw new Error(result.error);
-      }
-
-      return result.data;
-    } catch (error) {
-      if (error.code === 'ECONNREFUSED') {
-        throw new Error('Unable to connect to proxy server. Please ensure the proxy is running.');
-      }
-      throw error;
+      throw e;
     }
   }
 
   /**
-   * No-op close method for compatibility.
-   * Since we use HTTP requests instead of persistent connections,
-   * there's nothing to close.
+   * Closes the WebSocket connection gracefully.
+   * This method safely closes the connection if one exists, without
+   * throwing errors if no connection is available.
    * 
    * @async
    * @method close
-   * @returns {Promise<void>} Promise that resolves immediately
+   * @returns {Promise<void>} Promise that resolves when the connection is closed
+   * 
+   * @example
+   * // Clean shutdown
+   * await context.close();
+   * 
+   * @example
+   * // Safe cleanup in error handlers
+   * try {
+   *   // ... application logic
+   * } finally {
+   *   await context.close(); // Always safe to call
+   * }
    */
   async close() {
-    // No-op: HTTP requests don't need explicit closing
-    return Promise.resolve();
+    if (!this._ws) {
+      return;
+    }
+    await this._ws.close();
   }
 } 
