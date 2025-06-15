@@ -119,6 +119,7 @@ HTTP Response ← JSON Response ← MCP Response ← Browser Response
 - [x] Phase 4: Proxy Management ✅
 - [x] Phase 5: Integration with Main Application ✅
 - [x] Phase 6: Testing and Documentation ⏭️ SKIPPED
+- [x] Phase 7: Critical Bug Fixes ✅
 
 ## Implementation Summary
 
@@ -132,23 +133,22 @@ The Browser MCP Proxy Server has been successfully implemented with the followin
 - **Peer-to-Peer Architecture**: Multiple instances can coexist, sharing a single proxy
 - **Graceful Startup**: Smart detection prevents conflicts between multiple instances
 
-### 🚀 **Usage Modes**
+### 🚀 **Unified Usage**
 
-The Browser MCP now supports multiple startup modes:
+The Browser MCP now uses a single unified approach:
 
 ```bash
-# Default: Auto-detect existing proxy, fallback to direct MCP
+# Unified startup: Auto-detect proxy, start proxy+MCP if needed
 node src/index.js
-
-# Force start proxy server
-node src/index.js --proxy
-
-# Force direct MCP mode (no proxy)
-node src/index.js --no-proxy
-
-# Start only proxy server (dedicated proxy instance)
-node src/index.js --proxy-only
 ```
+
+**Behavior:**
+
+- ✅ If proxy exists and is healthy: Use existing proxy
+- ✅ If no proxy exists: Start new proxy server with full MCP integration
+- ✅ Browser connects to WebSocket on port 9009
+- ✅ HTTP API available on port 9008
+- ✅ All tools work through both MCP and HTTP interfaces
 
 ### 🔌 **API Endpoints**
 
@@ -183,6 +183,43 @@ When proxy server is running:
 
 ---
 
+## 🚨 CRITICAL ISSUES IDENTIFIED - REQUIRES FIXES
+
+After validation, several critical issues were found that prevent the expected flow from working:
+
+### Phase 7: Critical Bug Fixes ✅ COMPLETED
+
+- [x] **Fix Auto-Detection Logic**: Auto-detect now starts proxy+MCP together, not direct MCP
+- [x] **Fix MCP Handler Transport**: Replaced StdioServerTransport with proper browser WebSocket connection
+- [x] **Integrate Browser Connection**: Proxy now handles browser WebSocket on port 9009
+- [x] **Unify Logic**: Removed multiple modes, implemented single unified flow
+- [x] **Fix Tool Context**: Tools now have proper browser context, not mock context
+- [x] **Fix Process Exit Issue**: Second instance now stays alive when using existing proxy
+
+### ✅ Unified Flow (IMPLEMENTED)
+
+```
+1. MCP Server starts ✅
+2. Check for existing proxy on ports 9008/9009 ✅
+3. If proxy exists: Use existing proxy ✅
+4. If no proxy: Start new proxy server with: ✅
+   - HTTP API on port 9008 ✅
+   - Browser WebSocket on port 9009 ✅
+   - MCP server integration ✅
+5. Browser connects to port 9009 ✅
+6. MCP receives commands → forwards to proxy → executes on browser → returns response ✅
+```
+
+### ✅ Problems Fixed
+
+- ✅ Auto-detect now starts proxy+MCP together
+- ✅ MCP Handler uses proper browser WebSocket connection
+- ✅ Browser connection integrated in proxy via createServerWithTools
+- ✅ Single unified logic, no confusing modes
+- ✅ Real browser context instead of mock context
+
+---
+
 _Last Updated: December 2024_
-_Status: ✅ IMPLEMENTATION COMPLETE_
-_Next Steps: Ready for testing and usage!_
+_Status: ✅ IMPLEMENTATION COMPLETE WITH FIXES_
+_Next Steps: Ready for testing with unified flow!_

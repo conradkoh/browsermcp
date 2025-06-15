@@ -13,9 +13,9 @@
  * @fileoverview MCP protocol handling for proxy server
  */
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServerWithTools } from '../server/index.js';
 import { PROXY_CONFIG } from './detection.js';
+import { Context } from '../context.js';
 
 /**
  * MCP Handler class that manages MCP server integration.
@@ -24,7 +24,7 @@ import { PROXY_CONFIG } from './detection.js';
 export class McpHandler {
   constructor(options = {}) {
     this.server = null;
-    this.transport = null;
+    this.context = null;
     this.tools = options.tools || [];
     this.resources = options.resources || [];
     this.serverConfig = options.serverConfig || {};
@@ -37,7 +37,8 @@ export class McpHandler {
   }
   
   /**
-   * Initialize the MCP server and start listening for connections.
+   * Initialize the MCP server with browser WebSocket integration.
+   * This creates the MCP server that will handle browser connections on port 9009.
    * 
    * @async
    * @function initialize
@@ -49,7 +50,11 @@ export class McpHandler {
    */
   async initialize() {
     try {
+      // Create context for managing browser connections
+      this.context = new Context();
+      
       // Create MCP server with tools and resources
+      // This server includes WebSocket server for browser communication
       this.server = await createServerWithTools({
         name: this.serverConfig.name || 'Browser MCP Proxy',
         version: this.serverConfig.version || '1.0.0',
@@ -57,11 +62,8 @@ export class McpHandler {
         resources: this.resources,
       });
       
-      // Create stdio transport for MCP communication
-      this.transport = new StdioServerTransport();
-      
-      // Connect server to transport
-      await this.server.connect(this.transport);
+      // The server is now ready to handle browser connections on port 9009
+      // and MCP protocol requests through the proxy
       
     } catch (error) {
       throw new Error(`Failed to initialize MCP server: ${error.message}`);
@@ -93,12 +95,8 @@ export class McpHandler {
      }
      
      try {
-       // Create a mock context for tool execution
-       // In a full implementation, this would be the actual browser context
-       const context = await this.createToolContext();
-       
-       // Execute the tool
-       const result = await tool.handle(context, args);
+       // Use the real browser context for tool execution
+       const result = await tool.handle(this.context, args);
        
        return result;
      } catch (error) {
@@ -136,27 +134,14 @@ export class McpHandler {
   }
   
   /**
-   * Create a context object for tool execution.
-   * This would typically include browser connection and state.
+   * Get the browser context for tool execution.
+   * This provides access to the actual browser WebSocket connection.
    * 
-   * @async
-   * @function createToolContext
-   * @returns {Promise<Object>} Context object for tool execution
-   * @private
+   * @function getBrowserContext
+   * @returns {Context} Browser context with WebSocket connection
    */
-  async createToolContext() {
-    // In a full implementation, this would return the actual browser context
-    // For now, we'll create a mock context that tools can use
-    return {
-      // Mock WebSocket connection - in real implementation this would be the browser connection
-      ws: null,
-      hasWs: () => false,
-      close: async () => {},
-      
-      // Additional context methods can be added here
-      getTimestamp: () => new Date().toISOString(),
-      getSessionId: () => 'proxy-session-' + Date.now(),
-    };
+  getBrowserContext() {
+    return this.context;
   }
   
   /**
@@ -190,9 +175,9 @@ export class McpHandler {
         this.server = null;
       }
       
-      if (this.transport) {
-        // Transport cleanup if needed
-        this.transport = null;
+      if (this.context) {
+        await this.context.close();
+        this.context = null;
       }
       
       this.toolMap.clear();

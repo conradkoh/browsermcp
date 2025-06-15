@@ -196,21 +196,68 @@ async function createServer() {
  */
 
 // ============================================================================
-// STARTUP MODE FUNCTIONS
-// Different ways to start the Browser MCP server
+// UNIFIED STARTUP LOGIC
+// Single unified flow for Browser MCP server
 // ============================================================================
 
 /**
- * Start only the proxy server without the MCP state machine.
- * This mode is useful for dedicated proxy instances.
+ * Unified startup logic for Browser MCP server.
+ * Implements the expected flow:
+ * 1. Check for existing proxy server
+ * 2. If proxy exists and is healthy: Use existing proxy
+ * 3. If no proxy exists: Start new proxy server with MCP integration
  * 
  * @async
- * @function startProxyOnly
- * @returns {Promise<void>} Resolves when proxy server is started
+ * @function startBrowserMcp
+ * @returns {Promise<void>} Resolves when server is started
  */
-async function startProxyOnly() {
-  console.log('Starting Browser MCP in proxy-only mode...');
+async function startBrowserMcp() {
+  console.log('Starting Browser MCP server...');
   
+  // Check if proxy is already running
+  const proxyRunning = await isProxyRunning();
+  
+  if (proxyRunning) {
+    console.log('✅ Existing healthy proxy server detected');
+    const config = getProxyConfig();
+    console.log(`📡 Using proxy server:`);
+    console.log(`   HTTP API: ${config.endpoints.health}`);
+    console.log(`   Tool endpoint: ${config.endpoints.tool}`);
+    console.log(`   Browser WebSocket: ws://localhost:${config.MCP_PORT}`);
+    console.log('🚀 Browser MCP is ready to use existing proxy');
+    console.log('💡 Press Ctrl+C to exit');
+    
+    // Keep process running and monitor proxy health
+    const keepAlive = setInterval(async () => {
+      // Periodic health check to ensure proxy is still running
+      const stillRunning = await isProxyRunning();
+      if (!stillRunning) {
+        console.log('⚠️  Proxy server is no longer available');
+        console.log('🔄 You may want to restart to create a new proxy server');
+        // Could automatically restart here, but for now just warn
+      }
+    }, 30000); // Check every 30 seconds
+    
+    // Handle graceful shutdown
+    process.on('SIGINT', () => {
+      console.log('\n👋 Browser MCP client shutting down...');
+      clearInterval(keepAlive);
+      process.exit(0);
+    });
+    
+    process.on('SIGTERM', () => {
+      console.log('\n👋 Browser MCP client shutting down...');
+      clearInterval(keepAlive);
+      process.exit(0);
+    });
+    
+    // Keep the function from returning so the process stays alive
+    return new Promise(() => {}); // Never resolves, keeps process alive
+  }
+  
+  console.log('🔍 No existing proxy detected, starting new proxy server...');
+  
+  // Start new proxy server with full MCP integration
   const proxy = new ProxyServer({
     tools: snapshotTools,
     resources,
@@ -222,106 +269,17 @@ async function startProxyOnly() {
   
   const result = await proxy.start();
   
-  if (result.status === 'existing') {
-    console.log('Existing proxy server detected and healthy');
-    console.log('Proxy-only mode: Using existing proxy server');
+  if (result.status === 'started') {
+    console.log('✅ Proxy server started successfully');
+    console.log(`📡 Services available:`);
+    console.log(`   HTTP API: http://localhost:${result.ports.http}`);
+    console.log(`   Browser WebSocket: ws://localhost:${result.ports.mcp}`);
+    console.log(`   Tools: ${result.tools} available`);
+    console.log(`   Resources: ${result.resources} available`);
+    console.log('🚀 Browser MCP proxy server is ready');
   } else {
-    console.log('Proxy server started successfully in proxy-only mode');
+    console.log('ℹ️  Using existing proxy server');
   }
-  
-  // Keep the process running
-  process.on('SIGINT', async () => {
-    console.log('\nShutting down proxy server...');
-    await proxy.stop();
-    process.exit(0);
-  });
-}
-
-/**
- * Start with proxy server (forced or auto-detected).
- * 
- * @async
- * @function startWithProxy
- * @param {boolean} [force=false] - Force start proxy even if one exists
- * @returns {Promise<void>} Resolves when started
- */
-async function startWithProxy(force = false) {
-  console.log('Starting Browser MCP with proxy server...');
-  
-  if (!force) {
-    // Check if proxy is already running
-    const proxyRunning = await isProxyRunning();
-    if (proxyRunning) {
-      console.log('Existing healthy proxy server detected');
-      const config = getProxyConfig();
-      console.log(`Using proxy server at:`);
-      console.log(`  HTTP API: ${config.endpoints.health}`);
-      console.log(`  Tool endpoint: ${config.endpoints.tool}`);
-      console.log('Browser MCP is ready to use existing proxy');
-      return;
-    }
-  }
-  
-  // Start new proxy server
-  const proxy = new ProxyServer({
-    tools: snapshotTools,
-    resources,
-    serverConfig: {
-      name: appConfig.name,
-      version: packageJson.version,
-    },
-  });
-  
-  await proxy.start();
-  console.log('Browser MCP proxy server started successfully');
-}
-
-/**
- * Start in direct MCP mode using the state machine.
- * This bypasses the proxy system entirely.
- * 
- * @async
- * @function startDirectMcp
- * @returns {Promise<void>} Resolves when state machine is running
- */
-async function startDirectMcp() {
-  console.log('Starting Browser MCP in direct mode (no proxy)...');
-  
-  // Create state machine with server factory function
-  const stateMachine = new ServerStateMachine({
-    createServer,
-  });
-  
-  // Start the state machine - this will run until shutdown
-  await stateMachine.run();
-}
-
-/**
- * Auto-detection mode: Check for existing proxy, use if available,
- * otherwise start direct MCP mode.
- * 
- * @async
- * @function startWithAutoDetection
- * @returns {Promise<void>} Resolves when started
- */
-async function startWithAutoDetection() {
-  console.log('Starting Browser MCP with auto-detection...');
-  
-  // Check if proxy is already running
-  const proxyRunning = await isProxyRunning();
-  
-  if (proxyRunning) {
-    console.log('Existing healthy proxy server detected');
-    const config = getProxyConfig();
-    console.log(`Using proxy server at:`);
-    console.log(`  HTTP API: ${config.endpoints.health}`);
-    console.log(`  Tool endpoint: ${config.endpoints.tool}`);
-    console.log('Browser MCP is ready to use existing proxy');
-    return;
-  }
-  
-  console.log('No existing proxy detected, starting direct MCP mode...');
-  await startDirectMcp();
 }
 
 // ============================================================================
@@ -331,43 +289,26 @@ async function startWithAutoDetection() {
 
 /**
  * Configure and execute the Browser MCP server.
- * Sets up command-line interface with version information and
- * initializes the state machine for robust server lifecycle management.
+ * Uses unified logic that automatically handles proxy detection and startup.
  */
 program
   .version('Version ' + packageJson.version)
   .name(packageJson.name)
   .description(appConfig.description)
-  .option('--proxy', 'Start in proxy mode (HTTP API + MCP server)')
-  .option('--no-proxy', 'Force direct MCP mode (disable proxy detection)')
-  .option('--proxy-only', 'Start only the proxy server without MCP state machine')
   /**
    * Main action handler that starts the Browser MCP server.
-   * Supports multiple modes:
-   * - Default: Auto-detect proxy and use if available, otherwise start direct MCP
-   * - --proxy: Force start proxy server
-   * - --no-proxy: Force direct MCP mode
-   * - --proxy-only: Start only proxy server
+   * Implements unified logic:
+   * 1. Check for existing proxy server
+   * 2. If proxy exists: Use existing proxy
+   * 3. If no proxy: Start new proxy server with MCP integration
    * 
    * @async
    */
-  .action(async (options) => {
+  .action(async () => {
     try {
-      if (options.proxyOnly) {
-        // Start only the proxy server
-        await startProxyOnly();
-      } else if (options.proxy) {
-        // Force start proxy server
-        await startWithProxy(true);
-      } else if (options.proxy === false) {
-        // Force direct MCP mode
-        await startDirectMcp();
-      } else {
-        // Auto-detect mode (default)
-        await startWithAutoDetection();
-      }
+      await startBrowserMcp();
     } catch (error) {
-      console.error('Failed to start Browser MCP server:', error.message);
+      console.error('❌ Failed to start Browser MCP server:', error.message);
       process.exit(1);
     }
   });
