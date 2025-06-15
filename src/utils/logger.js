@@ -65,6 +65,7 @@ class Logger {
       fs.writeFileSync(this.logFile, `Log file: ${this.logFile}\n\n`, {
         flag: 'a',
       });
+      console.error(`Log file created at: ${this.logFile}`);
     } catch (error) {
       console.error('Failed to initialize log file:', error.message);
     }
