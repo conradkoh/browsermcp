@@ -5,4 +5,3 @@ alwaysApply: true
 ---
 # Logging
 - DO NOT use console.log because this is reserved for communication in MCP
-- Use logging from [logger.js](mdc:src/utils/logger.js)

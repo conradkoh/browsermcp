@@ -1,6 +1,5 @@
 import express from 'express';
 import { isMainThread, parentPort } from 'worker_threads';
-import { logger } from '../utils/logger.js';
 
 const app = express();
 app.use(express.json());
@@ -16,7 +15,7 @@ app.post('/register', (req, res) => {
   }
 
   registeredServers.set(id, { address, port, lastHeartbeat: Date.now() });
-  logger.log(`Server registered: ${id} at ${address}:${port}`);
+  console.log(`Server registered: ${id} at ${address}:${port}`);
   res.status(200).json({ message: 'Registered successfully' });
 });
 
@@ -30,7 +29,7 @@ app.post('/heartbeat', (req, res) => {
   if (registeredServers.has(id)) {
     const server = registeredServers.get(id);
     server.lastHeartbeat = Date.now();
-    logger.log(`Heartbeat from: ${id}`);
+    console.log(`Heartbeat from: ${id}`);
     res.status(200).json({ message: 'Heartbeat received' });
   } else {
     res.status(404).json({ error: 'Server not found' });
@@ -44,7 +43,7 @@ app.get('/servers', (req, res) => {
   for (const [id, server] of registeredServers.entries()) {
     if (server.lastHeartbeat < cutoffTime) {
       registeredServers.delete(id);
-      logger.log(`Server unregistered due to inactivity: ${id}`);
+      console.log(`Server unregistered due to inactivity: ${id}`);
     }
   }
   
@@ -55,7 +54,7 @@ app.get('/servers', (req, res) => {
 export function startDiscoveryServer(port = process.env.PORT || 3000) {
   return new Promise((resolve, reject) => {
     const server = app.listen(port, () => {
-      logger.log(`Discovery server listening on port ${port}`);
+      console.log(`Discovery server listening on port ${port}`);
       resolve(server);
     });
     server.on('error', (err) => {
@@ -75,7 +74,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
         process.send('ready');
       }
     } catch (error) {
-      logger.error('Failed to start discovery server in forked process:', error);
+      console.error('Failed to start discovery server in forked process:', error);
       process.exit(1); // Exit with error code
     }
   })();

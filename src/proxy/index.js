@@ -18,7 +18,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import fetch from 'node-fetch';
 import express from 'express';
-import { logger } from '../utils/logger.js';
 
 const PROXY_PORT = 9009;
 const DISCOVERY_SERVER_URL = 'http://localhost:3000';
@@ -58,14 +57,14 @@ async function fetchAvailableServers() {
     const response = await fetch(`${DISCOVERY_SERVER_URL}/servers`);
     if (response.ok) {
       const servers = await response.json();
-      logger.log(`Found ${servers.length} available Browser MCP servers`);
+      console.log(`Found ${servers.length} available Browser MCP servers`);
       return servers;
     } else {
-      logger.error(`Failed to fetch servers from discovery service: ${response.statusText}`);
+      console.error(`Failed to fetch servers from discovery service: ${response.statusText}`);
       return [];
     }
   } catch (error) {
-    logger.error(`Error fetching servers from discovery service: ${error.message}`);
+    console.error(`Error fetching servers from discovery service: ${error.message}`);
     return [];
   }
 }
@@ -80,9 +79,9 @@ async function updateServerList() {
   availableServers = newServers;
   
   if (newServers.length !== previousCount) {
-    logger.log(`Server list updated: ${newServers.length} servers available`);
+    console.log(`Server list updated: ${newServers.length} servers available`);
     if (newServers.length > 0) {
-      logger.log('Available servers:', newServers.map(s => `${s.address}:${s.port}`).join(', '));
+      console.log('Available servers:', newServers.map(s => `${s.address}:${s.port}`).join(', '));
     }
   }
   
@@ -155,7 +154,7 @@ function handleBrowserMessage(data) {
       }
     }
   } catch (error) {
-    logger.error('Error handling browser message:', error.message);
+    console.error('Error handling browser message:', error.message);
   }
 }
 
@@ -176,12 +175,12 @@ function createHttpServer() {
         return res.status(400).json({ error: 'Missing command type' });
       }
 
-      logger.log(`Received browser command from server ${serverId}: ${type}`);
+      console.log(`Received browser command from server ${serverId}: ${type}`);
 
       const result = await sendBrowserCommand(type, payload, options.timeoutMs || 30000);
       res.json({ data: result });
     } catch (error) {
-      logger.error('Error executing browser command:', error.message);
+      console.error('Error executing browser command:', error.message);
       res.status(500).json({ error: error.message });
     }
   });
@@ -203,16 +202,16 @@ async function startProxyServer() {
   // Create HTTP server for Browser MCP server API
   const httpApp = createHttpServer();
   const httpServer = httpApp.listen(PROXY_PORT, () => {
-    logger.log(`Proxy HTTP server listening on port ${PROXY_PORT}`);
+    console.log(`Proxy HTTP server listening on port ${PROXY_PORT}`);
   });
   
   // Create WebSocket server on the same port for browser extension connections
   const wss = new WebSocketServer({ server: httpServer });
   
-  logger.log(`WebSocket proxy server listening on port ${PROXY_PORT}`);
+  console.log(`WebSocket proxy server listening on port ${PROXY_PORT}`);
   
   wss.on('connection', (clientWs, request) => {
-    logger.log('New browser extension connection received');
+    console.log('New browser extension connection received');
     
     // Replace any existing browser connection
     if (connectedBrowser) {
@@ -226,7 +225,7 @@ async function startProxyServer() {
     
     // Handle browser disconnection
     clientWs.on('close', () => {
-      logger.log('Browser extension disconnected');
+      console.log('Browser extension disconnected');
       connectedBrowser = null;
       
       // Reject all pending commands
@@ -239,14 +238,14 @@ async function startProxyServer() {
     
     // Handle errors
     clientWs.on('error', (error) => {
-      logger.error('Browser WebSocket error:', error.message);
+      console.error('Browser WebSocket error:', error.message);
     });
     
-    logger.log('Browser extension connected successfully');
+    console.log('Browser extension connected successfully');
   });
   
   wss.on('error', (error) => {
-    logger.error('WebSocket server error:', error.message);
+    console.error('WebSocket server error:', error.message);
   });
   
   return { httpServer, wss };
@@ -258,9 +257,9 @@ async function startProxyServer() {
 export async function startProxy() {
   try {
     await startProxyServer();
-    logger.log('WebSocket proxy server started successfully');
+    console.log('WebSocket proxy server started successfully');
   } catch (error) {
-    logger.error('Failed to start proxy server:', error.message);
+    console.error('Failed to start proxy server:', error.message);
     process.exit(1);
   }
 }

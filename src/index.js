@@ -39,7 +39,6 @@ import { startDiscoveryServer } from './discovery/index.js';
 import { fork } from 'child_process';
 import { isPortInUse, killProcessOnPort, findAvailablePort } from './utils/port.js';
 import { startProxy } from './proxy/index.js';
-import { logger } from './utils/logger.js';
 
 // Package metadata loading for version information
 import { readFileSync } from 'fs';
@@ -76,12 +75,12 @@ async function registerWithDiscoveryServer(serverPort) {
       body: JSON.stringify({ id: serverId, address: 'localhost', port: serverPort }),
     });
     if (response.ok) {
-      logger.log(`Registered server ${serverId} with discovery service.`);
+      console.log(`Registered server ${serverId} with discovery service.`);
     } else {
-      logger.error(`Failed to register server ${serverId}: ${response.statusText}`);
+      console.error(`Failed to register server ${serverId}: ${response.statusText}`);
     }
   } catch (error) {
-    logger.error(`Error registering with discovery service: ${error.message}`);
+    console.error(`Error registering with discovery service: ${error.message}`);
   }
 }
 
@@ -99,18 +98,18 @@ async function sendHeartbeat() {
     if (!response.ok) {
       if (response.status === 404) {
         // Server not found, need to re-register
-        logger.log(`Server ${serverId} not found in discovery service, re-registering...`);
+        console.log(`Server ${serverId} not found in discovery service, re-registering...`);
         await registerWithDiscoveryServer(currentServerPort);
       } else {
-        logger.error(`Failed to send heartbeat for server ${serverId}: ${response.statusText}`);
+        console.error(`Failed to send heartbeat for server ${serverId}: ${response.statusText}`);
       }
     }
   } catch (error) {
-    logger.error(`Error sending heartbeat to discovery service: ${error.message}`);
-    logger.log('Attempting to restart discovery server...');
+    console.error(`Error sending heartbeat to discovery service: ${error.message}`);
+    console.log('Attempting to restart discovery server...');
     await runDiscoveryServerOnce(); // Attempt to restart discovery server
     // After restarting discovery server, re-register this server
-    logger.log('Re-registering with restarted discovery server...');
+    console.log('Re-registering with restarted discovery server...');
     await registerWithDiscoveryServer(currentServerPort);
   }
 }
@@ -125,14 +124,14 @@ async function getActiveServers() {
     const response = await fetch(`${discoveryServerUrl}/servers`);
     if (response.ok) {
       const servers = await response.json();
-      logger.log('Active servers:', servers);
+      console.log('Active servers:', servers);
       return servers;
     } else {
-      logger.error(`Failed to fetch active servers: ${response.statusText}`);
+      console.error(`Failed to fetch active servers: ${response.statusText}`);
       return [];
     }
   } catch (error) {
-    logger.error(`Error fetching active servers: ${error.message}`);
+    console.error(`Error fetching active servers: ${error.message}`);
     return [];
   }
 }
@@ -292,11 +291,11 @@ async function runDiscoveryServerOnce() {
   const DISCOVERY_SERVER_PORT = 3000;
   // Check if discovery server is already running
   if (await isPortInUse(DISCOVERY_SERVER_PORT)) {
-    logger.log(`Discovery server already running on port ${DISCOVERY_SERVER_PORT}`);
+    console.log(`Discovery server already running on port ${DISCOVERY_SERVER_PORT}`);
     return;
   }
 
-  logger.log('Discovery server not found, starting a new one...');
+  console.log('Discovery server not found, starting a new one...');
 
   // Start the discovery server as a child process
   const discoveryProcess = fork('./src/discovery/index.js', [], {
@@ -306,11 +305,11 @@ async function runDiscoveryServerOnce() {
 
   // Optional: You can listen to process messages or errors if needed
   discoveryProcess.on('error', (err) => {
-    logger.error('Discovery server child process error:', err);
+    console.error('Discovery server child process error:', err);
   });
 
   discoveryProcess.on('exit', (code, signal) => {
-    logger.log(
+    console.log(
       `Discovery server child process exited with code ${code} and signal ${signal}`
     );
   });
@@ -327,18 +326,18 @@ async function runDiscoveryServerOnce() {
     throw new Error(`Discovery server did not start on port ${DISCOVERY_SERVER_PORT} within the expected time.`);
   }
 
-  logger.log(`Discovery server is now active on port ${DISCOVERY_SERVER_PORT}`);
+  console.log(`Discovery server is now active on port ${DISCOVERY_SERVER_PORT}`);
 }
 
 async function runProxyServerOnce() {
   const PROXY_PORT = 9009;
   // Check if proxy server is already running
   if (await isPortInUse(PROXY_PORT)) {
-    logger.log(`Proxy server already running on port ${PROXY_PORT}`);
+    console.log(`Proxy server already running on port ${PROXY_PORT}`);
     return;
   }
 
-  logger.log('Proxy server not found, starting a new one...');
+  console.log('Proxy server not found, starting a new one...');
 
   // Start the proxy server as a child process
   const proxyProcess = fork('./src/proxy/index.js', [], {
@@ -347,11 +346,11 @@ async function runProxyServerOnce() {
 
   // Optional: You can listen to process messages or errors if needed
   proxyProcess.on('error', (err) => {
-    logger.error('Proxy server child process error:', err);
+    console.error('Proxy server child process error:', err);
   });
 
   proxyProcess.on('exit', (code, signal) => {
-    logger.log(
+    console.log(
       `Proxy server child process exited with code ${code} and signal ${signal}`
     );
   });
@@ -368,7 +367,7 @@ async function runProxyServerOnce() {
     throw new Error(`Proxy server did not start on port ${PROXY_PORT} within the expected time.`);
   }
 
-  logger.log(`Proxy server is now active on port ${PROXY_PORT}`);
+  console.log(`Proxy server is now active on port ${PROXY_PORT}`);
 }
 
 // ============================================================================
@@ -406,16 +405,16 @@ program
   .description('List all active Browser MCP servers')
   .action(async () => {
     await runDiscoveryServerOnce(); // Ensure discovery server is running
-    logger.log('Fetching active servers...');
+    console.log('Fetching active servers...');
     const activeServers = await getActiveServers();
     if (activeServers.length > 0) {
-      logger.log('--- Active Browser MCP Servers ---');
+      console.log('--- Active Browser MCP Servers ---');
       activeServers.forEach(server => {
-        logger.log(`ID: ${server.id}, Address: ${server.address}:${server.port}`);
+        console.log(`ID: ${server.id}, Address: ${server.address}:${server.port}`);
       });
-      logger.log('----------------------------------');
+      console.log('----------------------------------');
     } else {
-      logger.log('No active Browser MCP servers found.');
+      console.log('No active Browser MCP servers found.');
     }
   });
 
@@ -438,7 +437,7 @@ program
     // Find an available port for this Browser MCP server
     const serverPort = await findAvailablePort(mcpConfig.defaultWsPort + 1); // Start from 9010, since 9009 is for proxy
     currentServerPort = serverPort; // Store for use in heartbeat function
-    logger.log(`Browser MCP server will use port: ${serverPort}`);
+    console.log(`Browser MCP server will use port: ${serverPort}`);
 
     // Create state machine with server factory function
     const stateMachine = new ServerStateMachine({
