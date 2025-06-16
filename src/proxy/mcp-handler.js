@@ -43,6 +43,46 @@ export class McpHandler {
     // Build tool map for quick lookup
     this.tools.forEach(tool => {
       this.toolMap.set(tool.schema.name, tool);
+      logger.log('Registered tool', {
+        name: tool.schema.name,
+        description: tool.schema.description
+      });
+      
+      // Add friendly alias without the "browser_" prefix (e.g., "navigate")
+      if (tool.schema.name.startsWith('browser_')) {
+        const alias = tool.schema.name.replace(/^browser_/, '');
+        // Do not overwrite if an explicit tool already exists under that name
+        if (!this.toolMap.has(alias)) {
+          this.toolMap.set(alias, tool);
+          logger.log('Added friendly alias', {
+            original: tool.schema.name,
+            alias: alias
+          });
+        }
+        // Add alias with the historical duplicated prefix that some IDEs generate
+        const doublePrefixed = `mcp_browser${tool.schema.name}`;
+        if (!this.toolMap.has(doublePrefixed)) {
+          this.toolMap.set(doublePrefixed, tool);
+          logger.log('Added double-prefixed alias', {
+            original: tool.schema.name,
+            alias: doublePrefixed
+          });
+        }
+        // Support historical double "mcp_" prefix (e.g., "mcp_browsermcp_browser_click")
+        const legacyDoublePrefix = `mcp_browsermcp_${tool.schema.name}`;
+        if (!this.toolMap.has(legacyDoublePrefix)) {
+          this.toolMap.set(legacyDoublePrefix, tool);
+          logger.log('Added legacy double-prefix alias', {
+            original: tool.schema.name,
+            alias: legacyDoublePrefix
+          });
+        }
+      }
+    });
+    
+    logger.log('Tool map built successfully', {
+      totalMappings: this.toolMap.size,
+      availableNames: Array.from(this.toolMap.keys())
     });
   }
   
