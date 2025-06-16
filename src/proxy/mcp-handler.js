@@ -75,6 +75,15 @@ export class McpHandler {
             alias: doublePrefixed
           });
         }
+        // Add alias with a single "mcp_" prefix (e.g., "mcp_browser_click")
+        const singlePrefixed = `mcp_${tool.schema.name}`;
+        if (!this.toolMap.has(singlePrefixed)) {
+          this.toolMap.set(singlePrefixed, tool);
+          logger.log('Added single-prefixed alias', {
+            original: tool.schema.name,
+            alias: singlePrefixed
+          });
+        }
         // Support historical double "mcp_" prefix (e.g., "mcp_browsermcp_browser_click")
         const legacyDoublePrefix = `mcp_browsermcp_${tool.schema.name}`;
         if (!this.toolMap.has(legacyDoublePrefix)) {

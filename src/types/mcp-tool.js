@@ -296,7 +296,9 @@ export const TypeTool = z.object({
     /** Whether to press Enter after typing (for form submission) */
     submit: z
       .boolean()
-      .describe('Whether to submit entered text (press Enter after)'),
+      .describe('Whether to submit entered text (press Enter after)')
+      .optional()
+      .default(false),
   }),
 });
 
