@@ -334,41 +334,58 @@ export const type = {
    */
   handle: async (context, params) => {
     const validatedParams = TypeTool.shape.arguments.parse(params);
-    
+
     logger.log('Executing type tool', {
       element: validatedParams.element,
       ref: validatedParams.ref,
       textLength: validatedParams.text.length,
       submit: validatedParams.submit,
       hasContext: !!context,
-      hasWebSocket: context?.hasWs()
+      hasWebSocket: context?.hasWs(),
     });
-    
-    // Perform the text input action
-    await context.sendSocketMessage('browser_type', validatedParams);
-    
-    logger.log('Type action sent to browser, capturing snapshot');
-    
-    // Capture updated page state
-    const snapshotResult = await captureAriaSnapshot(context);
-    
-    logger.log('Type tool completed', {
-      element: validatedParams.element,
-      textLength: validatedParams.text.length,
-      submit: validatedParams.submit,
-      snapshotCaptured: !!(snapshotResult?.content),
-      contentItems: snapshotResult?.content?.length
-    });
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Typed "${validatedParams.text}" into "${validatedParams.element}"`,
-        },
-        ...snapshotResult.content,
-      ],
-    };
+
+    try {
+      // Perform the text input action
+      await context.sendSocketMessage('browser_type', validatedParams);
+
+      logger.log('Type action sent to browser, capturing snapshot');
+
+      // Capture updated page state
+      const snapshotResult = await captureAriaSnapshot(context);
+
+      logger.log('Type tool completed', {
+        element: validatedParams.element,
+        textLength: validatedParams.text.length,
+        submit: validatedParams.submit,
+        snapshotCaptured: !!(snapshotResult?.content),
+        contentItems: snapshotResult?.content?.length,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Typed "${validatedParams.text}" into "${validatedParams.element}"`,
+          },
+          ...snapshotResult.content,
+        ],
+      };
+    } catch (error) {
+      logger.error('Type tool encountered an error', {
+        element: validatedParams.element,
+        error: error.message,
+      });
+
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: `Failed to type into "${validatedParams.element}": ${error.message}`,
+          },
+        ],
+      };
+    }
   },
 };
 
