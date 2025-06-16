@@ -24,6 +24,7 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * MCP Handler class that manages MCP server integration.
@@ -39,6 +40,12 @@ export class McpHandler {
     this.resources = options.resources || [];
     this.serverConfig = options.serverConfig || {};
     this.toolMap = new Map();
+    
+    logger.log('Initializing MCP Handler', {
+      toolCount: this.tools.length,
+      resourceCount: this.resources.length,
+      serverConfig: this.serverConfig
+    });
     
     // Build tool map for quick lookup
     this.tools.forEach(tool => {
@@ -96,28 +103,85 @@ export class McpHandler {
    */
   async initialize() {
     try {
+      logger.log('Starting MCP Handler initialization', {
+        mcpPort: PROXY_CONFIG.MCP_PORT
+      });
+      
       // Shared Context manages the browser WebSocket connection.
       this.context = new Context();
+      logger.log('Created browser context');
 
       // Create a bare WebSocket server – **no MCP logic here**.  The only role
       // is to allow the browser extension to connect and communicate via the
       // Context instance used by the tool implementations.
       this.webSocketServer = await createWebSocketServer(PROXY_CONFIG.MCP_PORT);
+      logger.log('WebSocket server created successfully', {
+        port: PROXY_CONFIG.MCP_PORT
+      });
 
       // Ensure singleton connection semantics (new connection replaces old).
       this.webSocketServer.on('connection', (ws) => {
+        logger.log('Browser WebSocket connection received', {
+          hasExistingConnection: this.context.hasWs(),
+          remoteAddress: ws._socket?.remoteAddress,
+          remotePort: ws._socket?.remotePort
+        });
+        
         if (this.context.hasWs()) {
           try {
+            logger.log('Closing existing WebSocket connection');
             this.context.ws.close();
-          } catch { /* ignore */ }
+          } catch (error) {
+            logger.error('Error closing existing WebSocket', { error: error.message });
+          }
         }
+        
         this.context.ws = ws;
+        logger.log('Browser WebSocket connection established');
+        
+        // Add connection event handlers for debugging
+        ws.on('message', (data) => {
+          try {
+            const message = JSON.parse(data.toString());
+            logger.log('Received WebSocket message from browser', {
+              type: message.type,
+              id: message.id,
+              hasPayload: !!message.payload
+            });
+          } catch (error) {
+            logger.log('Received non-JSON WebSocket message', {
+              dataLength: data.length,
+              dataPreview: data.toString().substring(0, 100)
+            });
+          }
+        });
+        
+        ws.on('close', (code, reason) => {
+          logger.log('Browser WebSocket connection closed', {
+            code,
+            reason: reason?.toString(),
+            wasClean: code === 1000
+          });
+        });
+        
+        ws.on('error', (error) => {
+          logger.error('Browser WebSocket error', {
+            error: error.message,
+            stack: error.stack
+          });
+        });
       });
 
       // Note: stdio server is not created in proxy mode – the outer MCP
       // process will forward calls over HTTP.
+      
+      logger.log('MCP Handler initialization completed successfully');
 
     } catch (error) {
+      logger.error('Failed to initialize MCP Handler', {
+        error: error.message,
+        stack: error.stack
+      });
       throw new Error(`Failed to initialize Proxy WebSocket server: ${error.message}`);
     }
   }
@@ -135,23 +199,95 @@ export class McpHandler {
    * const result = await handler.executeToolCall('navigate', { url: 'https://example.com' });
    */
   async executeToolCall(toolName, args = {}) {
+    logger.log('Tool call received', {
+      toolName,
+      args,
+      hasContext: !!this.context,
+      hasWebSocket: this.context?.hasWs(),
+      availableTools: Array.from(this.toolMap.keys()).slice(0, 10) // First 10 for brevity
+    });
+    
     // Handle special internal tool calls
     if (toolName === '__list_tools__') {
+      logger.log('Handling internal __list_tools__ call');
       return this.listTools();
     }
     
     // Find the tool in our tool map
     const tool = this.toolMap.get(toolName);
     if (!tool) {
+      logger.error('Tool not found', {
+        requestedTool: toolName,
+        availableTools: Array.from(this.toolMap.keys()),
+        toolMapSize: this.toolMap.size
+      });
       throw new Error(`Tool "${toolName}" not found. Available tools: ${Array.from(this.toolMap.keys()).join(', ')}`);
     }
     
+    logger.log('Tool found and resolved', {
+      toolName,
+      resolvedName: tool.schema.name,
+      toolDescription: tool.schema.description,
+      hasHandle: typeof tool.handle === 'function'
+    });
+    
+    // Check browser connection state before execution
+    if (!this.context) {
+      logger.error('No browser context available for tool execution', { toolName });
+      throw new Error('Browser context not initialized');
+    }
+    
+    if (!this.context.hasWs()) {
+      logger.error('No browser WebSocket connection available', {
+        toolName,
+        contextExists: !!this.context
+      });
+      throw new Error('No browser connection available. Please connect the browser extension.');
+    }
+    
+    logger.log('Browser connection verified, executing tool', {
+      toolName,
+      wsReadyState: this.context.ws.readyState,
+      wsUrl: this.context.ws.url
+    });
+    
     try {
       // Use the real browser context for tool execution
+      const startTime = Date.now();
       const result = await tool.handle(this.context, args);
+      const executionTime = Date.now() - startTime;
+      
+      logger.log('Tool execution completed', {
+        toolName,
+        executionTimeMs: executionTime,
+        resultType: typeof result,
+        hasContent: !!(result?.content),
+        contentLength: result?.content?.length,
+        isError: result?.isError
+      });
+      
+      // Log result content for debugging (truncated)
+      if (result?.content) {
+        result.content.forEach((item, index) => {
+          logger.log(`Tool result content [${index}]`, {
+            type: item.type,
+            textLength: item.text?.length,
+            textPreview: item.text?.substring(0, 200),
+            hasData: !!item.data,
+            mimeType: item.mimeType
+          });
+        });
+      }
       
       return result;
     } catch (error) {
+      logger.error('Tool execution failed', {
+        toolName,
+        error: error.message,
+        stack: error.stack,
+        contextHasWs: this.context?.hasWs(),
+        wsReadyState: this.context?.ws?.readyState
+      });
       throw new Error(`Tool execution failed: ${error.message}`);
     }
   }

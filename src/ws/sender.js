@@ -17,6 +17,7 @@
 
 import { WebSocket } from 'ws';
 import { MESSAGE_RESPONSE_TYPE } from './types.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * Creates a message sender function for a specific WebSocket connection.
@@ -66,6 +67,14 @@ export function createSocketMessageSender(ws) {
     const id = generateId();
     const message = { id, type, payload };
     
+    logger.log('Preparing WebSocket message', {
+      id,
+      type,
+      hasPayload: !!payload,
+      timeoutMs,
+      wsReadyState: ws.readyState
+    });
+    
     return new Promise((resolve, reject) => {
       /**
        * Cleanup function that removes all event listeners and clears timeout.
@@ -76,6 +85,7 @@ export function createSocketMessageSender(ws) {
         ws.removeEventListener('error', errorHandler);
         ws.removeEventListener('close', cleanup);
         clearTimeout(timeoutId);
+        logger.log('WebSocket message cleanup completed', { id, type });
       };
       
       let timeoutId;
@@ -83,6 +93,12 @@ export function createSocketMessageSender(ws) {
       // Set up timeout if specified
       if (timeoutMs) {
         timeoutId = setTimeout(() => {
+          logger.error('WebSocket message timeout', {
+            id,
+            type,
+            timeoutMs,
+            wsReadyState: ws.readyState
+          });
           cleanup();
           reject(new Error(`WebSocket response timeout after ${timeoutMs}ms`));
         }, timeoutMs);
@@ -96,6 +112,14 @@ export function createSocketMessageSender(ws) {
         addSocketMessageResponseListener(ws, (responseMessage) => {
           const { payload: responsePayload } = responseMessage;
           
+          logger.log('Received WebSocket response', {
+            responseId: responsePayload.requestId,
+            expectedId: id,
+            hasResult: !!responsePayload.result,
+            hasError: !!responsePayload.error,
+            isMatch: responsePayload.requestId === id
+          });
+          
           // Only handle responses for our specific request
           if (responsePayload.requestId !== id) {
             return;
@@ -103,8 +127,19 @@ export function createSocketMessageSender(ws) {
           
           const { result, error } = responsePayload;
           if (error) {
+            logger.error('WebSocket response contains error', {
+              id,
+              type,
+              error
+            });
             reject(new Error(error));
           } else {
+            logger.log('WebSocket response successful', {
+              id,
+              type,
+              resultType: typeof result,
+              resultLength: typeof result === 'string' ? result.length : undefined
+            });
             resolve(result);
           }
           cleanup();
@@ -113,7 +148,12 @@ export function createSocketMessageSender(ws) {
       /**
        * Error handler for WebSocket connection errors.
        */
-      const errorHandler = (_event) => {
+      const errorHandler = (event) => {
+        logger.error('WebSocket connection error during message', {
+          id,
+          type,
+          error: event.error?.message || 'Unknown WebSocket error'
+        });
         cleanup();
         reject(new Error('WebSocket error occurred'));
       };
@@ -124,8 +164,19 @@ export function createSocketMessageSender(ws) {
       
       // Send the message if connection is open
       if (ws.readyState === WebSocket.OPEN) {
+        logger.log('Sending WebSocket message', {
+          id,
+          type,
+          messageLength: JSON.stringify(message).length
+        });
         ws.send(JSON.stringify(message));
       } else {
+        logger.error('WebSocket not open for message sending', {
+          id,
+          type,
+          readyState: ws.readyState,
+          readyStateText: getReadyStateText(ws.readyState)
+        });
         cleanup();
         reject(new Error('WebSocket is not open'));
       }
@@ -195,4 +246,21 @@ function generateId() {
   const timestamp = Date.now().toString(36);
   const randomStr = Math.random().toString(36).substring(2, 10);
   return `${timestamp}-${randomStr}`;
+}
+
+/**
+ * Convert WebSocket ready state number to readable text.
+ * 
+ * @function getReadyStateText
+ * @param {number} readyState - WebSocket ready state number
+ * @returns {string} Human-readable ready state text
+ */
+function getReadyStateText(readyState) {
+  switch (readyState) {
+    case WebSocket.CONNECTING: return 'CONNECTING';
+    case WebSocket.OPEN: return 'OPEN';
+    case WebSocket.CLOSING: return 'CLOSING';
+    case WebSocket.CLOSED: return 'CLOSED';
+    default: return `UNKNOWN(${readyState})`;
+  }
 } 

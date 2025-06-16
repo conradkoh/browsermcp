@@ -17,6 +17,7 @@
 
 import { mcpConfig } from './config/mcp.config.js';
 import { createSocketMessageSender } from './ws/sender.js';
+import { logger } from './utils/logger.js';
 
 /**
  * User-friendly error message displayed when no browser extension connection exists.
@@ -156,10 +157,39 @@ export class Context {
    * }
    */
   async sendSocketMessage(type, payload, options = { timeoutMs: 30000 }) {
+    logger.log('Sending WebSocket message', {
+      type,
+      hasPayload: !!payload,
+      payloadKeys: payload ? Object.keys(payload) : [],
+      timeoutMs: options.timeoutMs,
+      wsReadyState: this._ws?.readyState,
+      wsUrl: this._ws?.url
+    });
+    
     const { sendSocketMessage } = createSocketMessageSender(this.ws);
     try {
-      return await sendSocketMessage(type, payload, options);
+      const startTime = Date.now();
+      const result = await sendSocketMessage(type, payload, options);
+      const responseTime = Date.now() - startTime;
+      
+      logger.log('WebSocket message completed successfully', {
+        type,
+        responseTimeMs: responseTime,
+        resultType: typeof result,
+        resultKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+        resultLength: typeof result === 'string' ? result.length : undefined
+      });
+      
+      return result;
     } catch (e) {
+      logger.error('WebSocket message failed', {
+        type,
+        error: e.message,
+        stack: e.stack,
+        wsReadyState: this._ws?.readyState,
+        isNoConnectionError: e.message === mcpConfig.errors.noConnectedTab
+      });
+      
       // Translate internal MCP errors to user-friendly messages
       if (e instanceof Error && e.message === mcpConfig.errors.noConnectedTab) {
         throw new Error(noConnectionMessage);

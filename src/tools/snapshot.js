@@ -31,6 +31,7 @@ import {
   SelectOptionTool,
 } from '../types/mcp-tool.js';
 import { captureAriaSnapshot } from '../utils/aria-snapshot.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * Accessibility snapshot capture tool.
@@ -118,11 +119,26 @@ export const click = {
   handle: async (context, params) => {
     const validatedParams = ClickTool.shape.arguments.parse(params);
     
+    logger.log('Executing click tool', {
+      element: validatedParams.element,
+      ref: validatedParams.ref,
+      hasContext: !!context,
+      hasWebSocket: context?.hasWs()
+    });
+    
     // Perform the click action
     await context.sendSocketMessage('browser_click', validatedParams);
     
+    logger.log('Click action sent to browser, capturing snapshot');
+    
     // Capture updated page state
     const snapshotResult = await captureAriaSnapshot(context);
+    
+    logger.log('Click tool completed', {
+      element: validatedParams.element,
+      snapshotCaptured: !!(snapshotResult?.content),
+      contentItems: snapshotResult?.content?.length
+    });
     
     return {
       content: [
@@ -319,11 +335,30 @@ export const type = {
   handle: async (context, params) => {
     const validatedParams = TypeTool.shape.arguments.parse(params);
     
+    logger.log('Executing type tool', {
+      element: validatedParams.element,
+      ref: validatedParams.ref,
+      textLength: validatedParams.text.length,
+      submit: validatedParams.submit,
+      hasContext: !!context,
+      hasWebSocket: context?.hasWs()
+    });
+    
     // Perform the text input action
     await context.sendSocketMessage('browser_type', validatedParams);
     
+    logger.log('Type action sent to browser, capturing snapshot');
+    
     // Capture updated page state
     const snapshotResult = await captureAriaSnapshot(context);
+    
+    logger.log('Type tool completed', {
+      element: validatedParams.element,
+      textLength: validatedParams.text.length,
+      submit: validatedParams.submit,
+      snapshotCaptured: !!(snapshotResult?.content),
+      contentItems: snapshotResult?.content?.length
+    });
     
     return {
       content: [

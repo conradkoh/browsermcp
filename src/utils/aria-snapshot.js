@@ -13,6 +13,8 @@
  * @fileoverview ARIA accessibility tree snapshot capture utilities
  */
 
+import { logger } from './logger.js';
+
 /**
  * Captures a comprehensive accessibility snapshot of the current web page.
  * This function combines page metadata (URL, title) with the accessibility tree
@@ -48,21 +50,41 @@
  * };
  */
 export async function captureAriaSnapshot(context, status = '') {
-  // Gather page metadata and accessibility information
-  const url = await context.sendSocketMessage('getUrl', undefined);
-  const title = await context.sendSocketMessage('getTitle', undefined);
-  const snapshot = await context.sendSocketMessage('browser_snapshot', {});
+  logger.log('Starting ARIA snapshot capture', {
+    hasStatus: !!status,
+    statusLength: status.length,
+    hasContext: !!context,
+    hasWebSocket: context?.hasWs()
+  });
   
-  return {
-    content: [
-      {
-        type: 'text',
-        text: `${
-          status
-            ? `${status}
+  try {
+    // Gather page metadata and accessibility information
+    logger.log('Requesting page URL from browser');
+    const url = await context.sendSocketMessage('getUrl', undefined);
+    logger.log('URL received', { url, urlLength: url?.length });
+    
+    logger.log('Requesting page title from browser');
+    const title = await context.sendSocketMessage('getTitle', undefined);
+    logger.log('Title received', { title, titleLength: title?.length });
+    
+    logger.log('Requesting browser snapshot');
+    const snapshot = await context.sendSocketMessage('browser_snapshot', {});
+    logger.log('Snapshot received', { 
+      snapshotType: typeof snapshot,
+      snapshotLength: typeof snapshot === 'string' ? snapshot.length : undefined,
+      hasSnapshot: !!snapshot
+    });
+    
+    const result = {
+      content: [
+        {
+          type: 'text',
+          text: `${
+            status
+              ? `${status}
 `
-            : ''
-        }
+              : ''
+          }
 - Page URL: ${url}
 - Page Title: ${title}
 - Page Snapshot
@@ -70,7 +92,26 @@ export async function captureAriaSnapshot(context, status = '') {
 ${snapshot}
 \`\`\`
 `,
-      },
-    ],
-  };
+        },
+      ],
+    };
+    
+    logger.log('ARIA snapshot capture completed', {
+      hasStatus: !!status,
+      url,
+      title,
+      snapshotLength: typeof snapshot === 'string' ? snapshot.length : undefined,
+      resultContentLength: result.content[0].text.length
+    });
+    
+    return result;
+  } catch (error) {
+    logger.error('ARIA snapshot capture failed', {
+      error: error.message,
+      stack: error.stack,
+      hasContext: !!context,
+      hasWebSocket: context?.hasWs()
+    });
+    throw error;
+  }
 } 
