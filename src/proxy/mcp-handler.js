@@ -13,7 +13,7 @@
  * @fileoverview MCP protocol handling for proxy server
  */
 
-import { createServerWithTools } from '../server/index.js';
+import { createWebSocketServer } from '../ws/index.js';
 import { PROXY_CONFIG } from './detection.js';
 import { Context } from '../context.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -56,24 +56,29 @@ export class McpHandler {
    */
   async initialize() {
     try {
-      // Create shared context for managing browser connections
+      // Shared Context manages the browser WebSocket connection.
       this.context = new Context();
-      
-      // Create WebSocket server for browser communication *re-using the same
-      // context* so that HTTP tool invocations and browser WebSocket updates
-      // operate on identical state.
-      this.webSocketServer = await createServerWithTools({
-        name: this.serverConfig.name || 'Browser MCP Proxy',
-        version: this.serverConfig.version || '1.0.0',
-        tools: this.tools,
-        resources: this.resources,
-        context: this.context,
+
+      // Create a bare WebSocket server – **no MCP logic here**.  The only role
+      // is to allow the browser extension to connect and communicate via the
+      // Context instance used by the tool implementations.
+      this.webSocketServer = await createWebSocketServer(PROXY_CONFIG.MCP_PORT);
+
+      // Ensure singleton connection semantics (new connection replaces old).
+      this.webSocketServer.on('connection', (ws) => {
+        if (this.context.hasWs()) {
+          try {
+            this.context.ws.close();
+          } catch { /* ignore */ }
+        }
+        this.context.ws = ws;
       });
-      
-      // Note: stdio server is only created in direct IDE mode, not in proxy mode
-      
+
+      // Note: stdio server is not created in proxy mode – the outer MCP
+      // process will forward calls over HTTP.
+
     } catch (error) {
-      throw new Error(`Failed to initialize MCP server: ${error.message}`);
+      throw new Error(`Failed to initialize Proxy WebSocket server: ${error.message}`);
     }
   }
   

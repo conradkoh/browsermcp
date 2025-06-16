@@ -23,17 +23,9 @@
 
 import { program } from 'commander';
 import { appConfig } from './config/app.config.js';
-import { createServerWithTools, createForwardingMcpServer } from './server/index.js';
-import { ServerStateMachine } from './server/state-machine.js';
-import { navigate, goBack, goForward, pressKey, wait } from './tools/common.js';
-import { getConsoleLogs, screenshot } from './tools/custom.js';
-import {
-  snapshot,
-  click,
-  hover,
-  type,
-  selectOption,
-} from './tools/snapshot.js';
+import { createMcpServer } from './mcp/server.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { allTools } from './tools/index.js';
 import { ProxyServer, isProxyRunning, getProxyConfig } from './proxy.js';
 import { logger } from './utils/logger.js';
 
@@ -120,47 +112,6 @@ async function makeProxyRequest(toolName, args) {
 // ============================================================================
 
 /**
- * Common browser tools that don't require page snapshots.
- * These tools perform basic browser operations and return simple confirmations.
- * 
- * @type {Array<Object>}
- */
-const commonTools = [pressKey, wait];
-
-/**
- * Browser MCP specific tools for advanced browser features.
- * These tools provide capabilities unique to the Browser MCP extension.
- * 
- * @type {Array<Object>}
- */
-const customTools = [getConsoleLogs, screenshot];
-
-/**
- * DOM interaction tools that automatically capture page snapshots.
- * These tools perform actions and return updated page context for AI agents.
- * Navigation tools are configured with snapshot=true for AI context.
- * 
- * @type {Array<Object>}
- */
-const snapshotTools = [
-  // Navigation tools with snapshot capture for AI context
-  navigate(true),   // Navigate to URL and capture resulting page
-  goBack(true),     // Go back and capture resulting page
-  goForward(true),  // Go forward and capture resulting page
-  
-  // Page analysis and DOM interaction tools
-  snapshot,         // Capture current page accessibility tree
-  click,            // Click element and capture resulting page
-  hover,            // Hover over element and capture resulting page
-  type,             // Type text and capture resulting page
-  selectOption,     // Select dropdown option and capture resulting page
-  
-  // Include common and custom tools
-  ...commonTools,
-  ...customTools,
-];
-
-/**
  * MCP resources for read-only browser state access.
  * Currently empty but can be extended to provide browser history,
  * bookmarks, or other browser state information.
@@ -168,6 +119,9 @@ const snapshotTools = [
  * @type {Array<Object>}
  */
 const resources = [];
+
+// Tools are sourced from a single authoritative list.
+const runtimeTools = allTools;
 
 /**
  * Factory function for creating MCP server instances.
@@ -180,112 +134,31 @@ const resources = [];
  * @param {boolean} [useProxy=false] - Whether to create a forwarding server for existing proxy
  * @returns {Promise<Server>} Configured MCP server instance
  */
-async function createServer(useProxy = false) {
-  // Create proxy-forwarding tools that send requests to the proxy server
-  const proxyTools = snapshotTools.map(tool => ({
+async function createServer() {
+  // Forwarding wrappers (MCP -> Proxy HTTP)
+  const proxyTools = runtimeTools.map((tool) => ({
     schema: tool.schema,
-    handle: async (context, args) => {
-      // Forward tool call to proxy server via HTTP API
+    handle: async (_context, args) => {
       try {
-        const result = await makeProxyRequest(tool.schema.name, args);
-        return result;
+        return await makeProxyRequest(tool.schema.name, args);
       } catch (error) {
-        // Return MCP-formatted error response
         return {
-          content: [{ type: 'text', text: `Proxy communication error: ${error.message}` }],
+          content: [
+            { type: 'text', text: `Proxy communication error: ${error.message}` },
+          ],
           isError: true,
         };
       }
     },
   }));
-  
-  if (useProxy) {
-    // Create forwarding MCP server (no WebSocket) that forwards to proxy
-    return createForwardingMcpServer({
-      name: appConfig.name,
-      version: packageJson.version,
-      tools: proxyTools,
-      resources,
-    });
-  } else {
-    // Create full MCP server with WebSocket for proxy functionality
-    return createServerWithTools({
-      name: appConfig.name,
-      version: packageJson.version,
-      tools: snapshotTools,
-      resources,
-    });
-  }
-}
 
-/**
- * Server State Machine Diagram
- * ============================
- *
- * This diagram shows the state transitions in the ServerStateMachine:
- *
- * ```
- *     ┌─────────────────┐
- *     │   INITIALIZING  │
- *     └─────────┬───────┘
- *               │
- *               ▼
- *     ┌─────────────────┐    ┌───────────────────────────┐
- *     │ CREATING_SERVER │◄───┤ RETRYING_SERVER_CREATION  │
- *     └─────┬───────────┘    └─────────▲─────────────────┘
- *           │                          │
- *           ▼                          │ (retry if < maxRetries)
- *     ┌─────────────────┐              │
- *     │   CONNECTING    │              │
- *     └─────┬───────────┘              │
- *           │                          │
- *           ▼                          │
- *     ┌─────────────────┐    ┌────────────────────────┐  │
- *     │   CONNECTED     │    │ RETRYING_CONNECTION    │  │
- *     └─────┬───────────┘    └──────▲─────────────────┘  │
- *           │                       │                    │
- *           │ (connection lost)     │ (retry if < max)   │
- *           ▼                       │                    │
- *     ┌─────────────────┐           │                    │
- *     │  RECONNECTING   │───────────┘                    │
- *     └─────┬───────────┘                                │
- *           │                                            │
- *           └─────────────┐                              │
- *                         ▼                              │
- *     ┌─────────────────┐           ┌─────────────────┐  │
- *     │   RESTARTING    │──────────►│     FAILED      │──┘
- *     └─────┬───────────┘           └─────────────────┘
- *           │                             ▲
- *           └─────────────────────────────┘
- *                         │
- *                         │ (max retries exceeded)
- *
- *     Exit Signals (SIGTERM, SIGINT, etc.)
- *                │
- *                ▼
- *     ┌─────────────────┐
- *     │ SHUTTING_DOWN   │
- *     └─────┬───────────┘
- *           │
- *           ▼
- *     ┌─────────────────┐
- *     │    SHUTDOWN     │
- *     └─────────────────┘
- * ```
- *
- * **State Descriptions:**
- * - **INITIALIZING**: Initial state at startup
- * - **CREATING_SERVER**: Attempting to create MCP server instance
- * - **RETRYING_SERVER_CREATION**: Waiting before retrying server creation
- * - **CONNECTING**: Attempting to connect server to transport (stdio)
- * - **RETRYING_CONNECTION**: Waiting before retrying connection
- * - **CONNECTED**: Successfully running and handling requests
- * - **RECONNECTING**: Connection lost, attempting to reconnect
- * - **RESTARTING**: Max connection retries exceeded, performing full restart
- * - **SHUTTING_DOWN**: Graceful shutdown initiated
- * - **SHUTDOWN**: Shutdown complete
- * - **FAILED**: Permanent failure, process will exit
- */
+  return createMcpServer({
+    name: appConfig.name,
+    version: packageJson.version,
+    tools: proxyTools,
+    resources,
+  });
+}
 
 // ============================================================================
 // UNIFIED STARTUP LOGIC
@@ -317,16 +190,11 @@ async function startBrowserMcp() {
     logger.log(`   Tool endpoint: ${config.endpoints.tool}`);
     logger.log(`   Browser WebSocket: ws://localhost:${config.MCP_PORT}`);
     
-    // Start MCP server that communicates with existing proxy
-    logger.log('🔌 Starting MCP server with stdio transport (connects to existing proxy)...');
-    
-    const stateMachine = new ServerStateMachine({
-      createServer: () => createServer(true), // Use proxy forwarding
-      maxRetries: 3,
-      retryDelay: 2000,
-    });
-    
-    await stateMachine.run();
+    // Create MCP server and connect via stdio transport.
+    const mcpServer = await createServer();
+    const transport = new StdioServerTransport();
+    await mcpServer.connect(transport);
+    logger.log('MCP server running (stdio). Press Ctrl+C to exit.');
     return;
   }
   
@@ -334,7 +202,7 @@ async function startBrowserMcp() {
   
   // Start new proxy server
   const proxy = new ProxyServer({
-    tools: snapshotTools,
+    tools: runtimeTools,
     resources,
     serverConfig: {
       name: appConfig.name,
@@ -355,13 +223,10 @@ async function startBrowserMcp() {
     // Now start MCP server that communicates with the new proxy
     logger.log('🔌 Starting MCP server with stdio transport (connects to new proxy)...');
     
-    const stateMachine = new ServerStateMachine({
-      createServer: () => createServer(true), // Use proxy forwarding
-      maxRetries: 3,
-      retryDelay: 2000,
-    });
-    
-    await stateMachine.run();
+    const mcpServer = await createServer();
+    const transport = new StdioServerTransport();
+    await mcpServer.connect(transport);
+    logger.log('MCP server running (stdio). Press Ctrl+C to exit.');
   } else {
     logger.log('ℹ️  Using existing proxy server');
   }

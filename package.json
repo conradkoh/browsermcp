@@ -4,10 +4,14 @@
   "description": "",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node bin/mcp.js",
+    "proxy": "node bin/proxy.js",
+    "mcp": "node bin/mcp.js"
   },
   "bin": {
-    "mcp-server-browsermcp": "src/index.js"
+    "browsermcp": "bin/mcp.js",
+    "browsermcp-proxy": "bin/proxy.js",
+    "mcp-server-browsermcp": "bin/mcp.js"
   },
   "repository": {
     "type": "git",
